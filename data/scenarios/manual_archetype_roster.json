@@ -1,0 +1,11 @@
+[
+  { "name": "Cy Falconer", "archetype": "table_setter", "handedness": "R" },
+  { "name": "Jude Falconer", "archetype": "gap_to_gap", "handedness": "R" },
+  { "name": "Player 3", "archetype": "contact", "handedness": "R" },
+  { "name": "Player 4", "archetype": "power", "handedness": "R" },
+  { "name": "Player 5", "archetype": "balanced", "handedness": "R" },
+  { "name": "Player 6", "archetype": "speedster", "handedness": "R" },
+  { "name": "Player 7", "archetype": "contact", "handedness": "R" },
+  { "name": "Player 8", "archetype": "weak_hitter", "handedness": "R" },
+  { "name": "Player 9", "archetype": "weak_hitter", "handedness": "R" }
+]
