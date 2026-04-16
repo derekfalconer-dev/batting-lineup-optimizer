@@ -112,7 +112,7 @@ class OptimizerSession:
         if self.data_source in {"gc", "gc_plus_tweaks"}:
             return self.csv_path is not None
 
-        if self.data_source in {"manual_archetypes", "manual_traits"}:
+        if self.data_source in {"manual_archetypes", "manual_traits", "gc_merged"}:
             return len(self.editable_profiles) > 0
 
         return False

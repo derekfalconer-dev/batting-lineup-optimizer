@@ -27,6 +27,7 @@ from core.api_service import (
     clear_player_adjustment,
     configure_empty_manual_session,
     configure_gc_session,
+    configure_reconciled_gc_session,
     create_session,
     delete_player,
     delete_saved_scenario,
@@ -55,6 +56,13 @@ from core.chart_data import (
     build_comparison_table_rows,
     build_density_chart_data,
     build_survival_curve_chart_data,
+)
+
+from core.roster_reconciliation import (
+    DuplicateCandidate,
+    find_possible_duplicate_candidates,
+    merge_selected_records,
+    reconcile_gamechanger_files,
 )
 
 from core.schemas import (
@@ -129,6 +137,21 @@ def ensure_ui_state() -> None:
     if "coach_lab_saved_scenario_messages" not in st.session_state:
         st.session_state.coach_lab_saved_scenario_messages = []
 
+    if "multi_gc_reconciliation_result" not in st.session_state:
+        st.session_state.multi_gc_reconciliation_result = None
+
+    if "multi_gc_final_records" not in st.session_state:
+        st.session_state.multi_gc_final_records = None
+
+    if "multi_gc_uploaded_file_names" not in st.session_state:
+        st.session_state.multi_gc_uploaded_file_names = []
+
+    if "multi_gc_import_summary" not in st.session_state:
+        st.session_state.multi_gc_import_summary = None
+
+    if "multi_gc_manual_merge_message" not in st.session_state:
+        st.session_state.multi_gc_manual_merge_message = None
+
 
 def get_backend_session() -> SessionStateSchema:
     """
@@ -184,6 +207,240 @@ def safe_get_results() -> WorkflowResponseSchema | None:
         return get_results(st.session_state.optimizer_session_id)
     except ValueError:
         return None
+
+
+def reset_multi_gc_ui_state() -> None:
+    st.session_state.multi_gc_reconciliation_result = None
+    st.session_state.multi_gc_final_records = None
+    st.session_state.multi_gc_uploaded_file_names = []
+    st.session_state.multi_gc_import_summary = None
+
+
+def save_uploaded_files(uploaded_files, *, prefix: str) -> list[Path]:
+    """
+    Persist multiple Streamlit UploadedFile objects to the session upload dir.
+    """
+    uploads_dir = Path(st.session_state.uploads_dir)
+    saved_paths: list[Path] = []
+
+    for idx, uploaded_file in enumerate(uploaded_files, start=1):
+        original_name = Path(uploaded_file.name).name
+        safe_name = f"{prefix}_{idx:02d}_{original_name}"
+        target_path = uploads_dir / safe_name
+        target_path.write_bytes(uploaded_file.getbuffer())
+        saved_paths.append(target_path)
+
+    return saved_paths
+
+
+def duplicate_candidate_key(candidate: DuplicateCandidate) -> str:
+    left = candidate.left_normalized_name.strip().lower()
+    right = candidate.right_normalized_name.strip().lower()
+    ordered = sorted([left, right])
+    return f"{ordered[0]}__{ordered[1]}"
+
+
+def build_multi_gc_preview_rows(records: list[dict]) -> list[dict]:
+    rows = []
+
+    for record in records:
+        pa = int(float(record.get("PA", 0) or 0))
+        avg = float(record.get("AVG", 0.0) or 0.0)
+        obp = float(record.get("OBP", 0.0) or 0.0)
+        slg = float(record.get("SLG", 0.0) or 0.0)
+        k_rate = float(record.get("K_RATE", 0.0) or 0.0)
+        bb_rate = float(record.get("BB_RATE", 0.0) or 0.0)
+
+        rows.append(
+            {
+                "Player": record.get("name", ""),
+                "PA": pa,
+                "AVG": f"{avg:.3f}",
+                "OBP": f"{obp:.3f}",
+                "SLG": f"{slg:.3f}",
+                "K%": f"{k_rate:.1%}",
+                "BB%": f"{bb_rate:.1%}",
+                "Files": int(record.get("source_file_count", 0) or 0),
+                "Merged Rows": int(record.get("merged_record_count", 0) or 0),
+            }
+        )
+
+    rows.sort(key=lambda row: (str(row["Player"]).lower(), -int(row["PA"])))
+    return rows
+
+
+def build_duplicate_candidate_rows(candidates: list[DuplicateCandidate]) -> list[dict]:
+    rows = []
+
+    for candidate in candidates:
+        rows.append(
+            {
+                "Player A": candidate.left_name,
+                "Player B": candidate.right_name,
+                "Why flagged": candidate.reason,
+                "A files": len(candidate.left_sources),
+                "B files": len(candidate.right_sources),
+            }
+        )
+
+    return rows
+
+
+def filter_multi_gc_preview_rows(rows: list[dict], query: str) -> list[dict]:
+    query = str(query or "").strip().lower()
+    if not query:
+        return rows
+
+    filtered = []
+    for row in rows:
+        player = str(row.get("Player", "")).lower()
+        if query in player:
+            filtered.append(row)
+    return filtered
+
+
+def filter_duplicate_candidate_rows(
+    candidates: list[DuplicateCandidate],
+    query: str,
+) -> list[DuplicateCandidate]:
+    query = str(query or "").strip().lower()
+    if not query:
+        return candidates
+
+    filtered: list[DuplicateCandidate] = []
+    for candidate in candidates:
+        left_name = candidate.left_name.lower()
+        right_name = candidate.right_name.lower()
+        reason = candidate.reason.lower()
+
+        if query in left_name or query in right_name or query in reason:
+            filtered.append(candidate)
+
+    return filtered
+
+
+def apply_duplicate_merge_decisions(
+    *,
+    records: list[dict],
+    candidates: list[DuplicateCandidate],
+) -> list[dict]:
+    """
+    Apply coach-selected manual merges from the duplicate review UI.
+
+    MVP behavior:
+    - each candidate has a checkbox
+    - checked pairs are merged
+    - overlapping selections are rejected to avoid ambiguous chains
+    """
+    selected_pairs: list[DuplicateCandidate] = []
+
+    for candidate in candidates:
+        key = duplicate_candidate_key(candidate)
+        should_merge = st.session_state.get(f"merge_dup_{key}", False)
+        if should_merge:
+            selected_pairs.append(candidate)
+
+    if not selected_pairs:
+        return list(records)
+
+    used_names: set[str] = set()
+    merged_name_pairs: list[set[str]] = []
+
+    for candidate in selected_pairs:
+        pair = {
+            candidate.left_name.strip(),
+            candidate.right_name.strip(),
+        }
+
+        if used_names.intersection(pair):
+            raise ValueError(
+                "You selected overlapping duplicate merges. "
+                "For this MVP, merge one pair at a time when the groups overlap."
+            )
+
+        used_names.update(pair)
+        merged_name_pairs.append(pair)
+
+    remaining_records = list(records)
+    new_records: list[dict] = []
+
+    for pair in merged_name_pairs:
+        merged_record = merge_selected_records(
+            remaining_records,
+            selected_names=sorted(pair),
+        )
+        new_records.append(merged_record)
+
+        remaining_records = [
+            record
+            for record in remaining_records
+            if str(record.get("name", "")).strip() not in pair
+        ]
+
+    final_records = remaining_records + new_records
+    final_records.sort(key=lambda r: str(r.get("name", "")).lower())
+    return final_records
+
+
+def apply_manual_merge_selection(
+    *,
+    records: list[dict],
+    left_player_name: str,
+    right_player_name: str,
+) -> list[dict]:
+    """
+    Merge any two coach-selected players from the current preview roster.
+
+    This is the fallback when heuristic duplicate detection misses a pair.
+    """
+    left_player_name = str(left_player_name).strip()
+    right_player_name = str(right_player_name).strip()
+
+    if not left_player_name or not right_player_name:
+        raise ValueError("Please select two players to merge.")
+
+    if left_player_name == right_player_name:
+        raise ValueError("Please select two different players to merge.")
+
+    merged_record = merge_selected_records(
+        records,
+        selected_names=[left_player_name, right_player_name],
+    )
+
+    remaining_records = [
+        record
+        for record in records
+        if str(record.get("name", "")).strip() not in {left_player_name, right_player_name}
+    ]
+
+    final_records = remaining_records + [merged_record]
+    final_records.sort(key=lambda r: str(r.get("name", "")).lower())
+    return final_records
+
+
+def finalize_multi_gc_import(
+    *,
+    final_records: list[dict],
+    file_names: list[str],
+) -> None:
+    configure_reconciled_gc_session(
+        st.session_state.optimizer_session_id,
+        merged_records=final_records,
+        data_source="gc_merged",
+    )
+
+    initialize_editable_roster(st.session_state.optimizer_session_id)
+
+    st.session_state.multi_gc_import_summary = {
+        "file_names": list(file_names),
+        "final_player_count": len(final_records),
+    }
+
+    st.session_state.show_team_loader = False
+    st.session_state.active_results_tab = "Coach Lab"
+    st.session_state.coach_lab_workspace_mode = "custom"
+    st.session_state.coach_lab_last_custom_eval = None
+    st.session_state.last_completed_results = None
 
 
 def render_how_to_use_panel() -> None:
@@ -245,6 +502,7 @@ def render_team_loaded_next_steps(session_state: SessionStateSchema) -> None:
     source_label_map = {
         "gc": "GameChanger roster",
         "gc_plus_tweaks": "GameChanger roster",
+        "gc_merged": "Merged multi-file GameChanger roster",
         "manual_archetypes": "Manual roster",
         "manual_traits": "Manual roster",
     }
@@ -602,6 +860,15 @@ def render_team_entry_panel(session_state: SessionStateSchema) -> None:
         with loaded_col1:
             render_team_loaded_next_steps(session_state)
 
+            import_summary = st.session_state.get("multi_gc_import_summary")
+            if session_state.data_source == "gc_merged" and import_summary:
+                with st.container(border=True):
+                    st.markdown("#### Multi-file import summary")
+                    st.caption(
+                        f"Built from {len(import_summary.get('file_names', []))} GameChanger files "
+                        f"into {import_summary.get('final_player_count', 0)} merged players."
+                    )
+
         with loaded_col2:
             with st.container(border=True):
                 st.markdown("### Team source")
@@ -617,11 +884,17 @@ def render_team_entry_panel(session_state: SessionStateSchema) -> None:
     with st.container(border=True):
         st.markdown("### Start here")
 
-        entry_col1, entry_col2 = st.columns(2)
+        entry_tab_single, entry_tab_multi, entry_tab_empty = st.tabs(
+            ["Single GC Import", "Multi-GC Import", "Start Empty Team"]
+        )
 
-        with entry_col1:
-            st.markdown("#### Import GameChanger CSV")
-            st.caption("Use real game stats as your starting roster.")
+        # -----------------------------------------------------------------
+        # Single-file import
+        # -----------------------------------------------------------------
+        with entry_tab_single:
+            st.markdown("#### Import one GameChanger CSV")
+            st.caption("Use one GameChanger data file as your starting roster.")
+
             gc_file = st.file_uploader(
                 "GameChanger team stats file",
                 type=["csv"],
@@ -638,6 +911,8 @@ def render_team_entry_panel(session_state: SessionStateSchema) -> None:
                     st.error("Please upload a GameChanger CSV first.")
                 else:
                     try:
+                        reset_multi_gc_ui_state()
+
                         csv_path = save_uploaded_file(gc_file, "gamechanger.csv")
 
                         updated = configure_gc_session(
@@ -652,6 +927,8 @@ def render_team_entry_panel(session_state: SessionStateSchema) -> None:
                         st.session_state.show_team_loader = False
                         st.session_state.active_results_tab = "Coach Lab"
                         st.session_state.coach_lab_workspace_mode = "custom"
+                        st.session_state.coach_lab_last_custom_eval = None
+                        st.session_state.last_completed_results = None
 
                         st.success("GameChanger roster imported.")
                         st.caption(f"Source mode: {updated.data_source}")
@@ -659,7 +936,267 @@ def render_team_entry_panel(session_state: SessionStateSchema) -> None:
                     except Exception as exc:
                         st.error(f"Could not import GameChanger roster: {exc}")
 
-        with entry_col2:
+        # -----------------------------------------------------------------
+        # Multi-file import
+        # -----------------------------------------------------------------
+        with entry_tab_multi:
+            st.markdown("#### Import multiple GameChanger CSVs")
+            st.caption(
+                "Use multiple imports to improve sample size. "
+                "The app safely auto-merges exact name matches, then surfaces merge candidates for coach review."
+            )
+
+            multi_gc_files = st.file_uploader(
+                "GameChanger team stats files",
+                type=["csv"],
+                accept_multiple_files=True,
+                key="multi_gc_csv_upload",
+            )
+
+            review_col1, review_col2 = st.columns([1.2, 1])
+
+            with review_col1:
+                if st.button(
+                    "Build merged roster preview",
+                    use_container_width=True,
+                    type="primary",
+                    key="build_multi_gc_preview_btn",
+                ):
+                    if not multi_gc_files:
+                        st.error("Please upload at least two GameChanger CSV files.")
+                    elif len(multi_gc_files) < 2:
+                        st.error("Please upload at least two files for the multi-GC workflow.")
+                    else:
+                        try:
+                            saved_paths = save_uploaded_files(
+                                multi_gc_files,
+                                prefix="multi_gc",
+                            )
+
+                            reconciliation = reconcile_gamechanger_files(saved_paths)
+
+                            st.session_state.multi_gc_reconciliation_result = reconciliation
+                            st.session_state.multi_gc_final_records = list(reconciliation.auto_merged_records)
+                            st.session_state.multi_gc_uploaded_file_names = [f.name for f in multi_gc_files]
+
+                            st.success(
+                                f"Built merged roster preview from {len(saved_paths)} files."
+                            )
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"Could not build merged roster preview: {exc}")
+
+            with review_col2:
+                if st.button(
+                    "Reset multi-file preview",
+                    use_container_width=True,
+                    key="reset_multi_gc_preview_btn",
+                ):
+                    reset_multi_gc_ui_state()
+                    st.rerun()
+
+            reconciliation = st.session_state.get("multi_gc_reconciliation_result")
+            final_records = st.session_state.get("multi_gc_final_records")
+
+            if reconciliation is not None and final_records is not None:
+                with st.container(border=True):
+                    st.markdown("##### Merge summary")
+                    stat_col1, stat_col2, stat_col3, stat_col4 = st.columns(4)
+
+                    st.caption(
+                        f"Imported {len(reconciliation.input_files)} files → "
+                        f"{reconciliation.raw_record_count} raw player rows → "
+                        f"{len(final_records)} current merged players"
+                    )
+
+                    stat_col1.metric("Files", len(reconciliation.input_files))
+                    stat_col2.metric("Raw player rows", reconciliation.raw_record_count)
+                    stat_col3.metric("After safe auto-merge", len(reconciliation.auto_merged_records))
+                    stat_col4.metric("Merge candidates", len(reconciliation.duplicate_candidates))
+
+                    if reconciliation.auto_merge_groups:
+                        with st.expander("Show safe auto-merges the app already applied", expanded=False):
+                            for group in reconciliation.auto_merge_groups:
+                                st.write(" + ".join(group))
+
+                with st.container(border=True):
+                    st.markdown("##### Merged roster preview")
+                    st.caption(
+                        "This is the current roster that will be sent into Coach Lab after any review merges."
+                    )
+
+                    preview_filter = st.text_input(
+                        "Filter roster preview by player name",
+                        value="",
+                        key="multi_gc_preview_filter",
+                        placeholder="Type part of a name like cy, max, cam, george...",
+                    )
+
+                    preview_rows = build_multi_gc_preview_rows(final_records)
+                    filtered_preview_rows = filter_multi_gc_preview_rows(preview_rows, preview_filter)
+
+                    if filtered_preview_rows:
+                        st.dataframe(filtered_preview_rows, use_container_width=True, hide_index=True)
+                    else:
+                        st.caption("No players match that filter.")
+
+                if reconciliation.duplicate_candidates:
+                    with st.container(border=True):
+                        st.markdown("Players you may want to combine")
+                        st.caption(
+                            "These names were not auto-merged, but the app thinks they may refer to the same player. "
+                            "Only merge a pair when you are confident it is the same player."
+                        )
+
+                        candidate_filter = st.text_input(
+                            "Filter merge candidates",
+                            value="",
+                            key="multi_gc_candidate_filter",
+                            placeholder="Type part of a player name like cy, max, cam...",
+                        )
+
+                        filtered_candidates = filter_duplicate_candidate_rows(
+                            reconciliation.duplicate_candidates,
+                            candidate_filter,
+                        )
+
+                        if filtered_candidates:
+                            duplicate_rows = build_duplicate_candidate_rows(filtered_candidates)
+                            st.dataframe(duplicate_rows, use_container_width=True, hide_index=True)
+
+                            for idx, candidate in enumerate(filtered_candidates, start=1):
+                                key = duplicate_candidate_key(candidate)
+                                label = (
+                                    f"Merge {candidate.left_name} + {candidate.right_name} "
+                                    f"({candidate.reason})"
+                                )
+                                st.checkbox(
+                                    label,
+                                    key=f"merge_dup_{key}",
+                                    help="Unchecked means keep them separate for now.",
+                                )
+
+                            if st.button(
+                                "Merge selected players",
+                                use_container_width=True,
+                                key="apply_selected_duplicate_merges_btn",
+                            ):
+                                try:
+                                    updated_records = apply_duplicate_merge_decisions(
+                                        records=list(reconciliation.auto_merged_records),
+                                        candidates=reconciliation.duplicate_candidates,
+                                    )
+                                    updated_candidates = find_possible_duplicate_candidates(updated_records)
+
+                                    st.session_state.multi_gc_final_records = updated_records
+                                    reconciliation.auto_merged_records = list(updated_records)
+                                    reconciliation.duplicate_candidates = updated_candidates
+                                    st.session_state.multi_gc_reconciliation_result = reconciliation
+
+                                    st.success("Applied selected review merges.")
+                                    st.rerun()
+                                except Exception as exc:
+                                    st.error(f"Could not apply review merge decisions: {exc}")
+                        else:
+                            st.caption("No merge candidates match that filter.")
+
+                else:
+                    st.success("No merge candidates were found under the current conservative review rules.")
+                    st.caption(
+                        "That usually means the safe auto-merge pass did not see any obvious abbreviation-style name matches. "
+                        "If you still know two rows are the same player, use the manual merge tool below."
+                    )
+
+
+                with st.container(border=True):
+                    st.markdown("##### Manual merge players")
+                    st.caption(
+                        "Use this when you know two roster rows belong to the same player, even if the app did not surface them as a merge candidate."
+                    )
+
+                    available_names = [
+                        str(record.get("name", "")).strip()
+                        for record in final_records
+                        if str(record.get("name", "")).strip()
+                    ]
+                    available_names = sorted(available_names, key=lambda x: x.lower())
+
+                    if len(available_names) >= 2:
+                        manual_merge_col1, manual_merge_col2 = st.columns(2)
+
+                        with manual_merge_col1:
+                            manual_merge_left = st.selectbox(
+                                "Player A",
+                                options=available_names,
+                                index=0,
+                                key="manual_merge_left_player",
+                            )
+
+                        with manual_merge_col2:
+                            default_right_index = 1 if len(available_names) > 1 else 0
+                            manual_merge_right = st.selectbox(
+                                "Player B",
+                                options=available_names,
+                                index=default_right_index,
+                                key="manual_merge_right_player",
+                            )
+
+                        if st.button(
+                            "Merge selected players",
+                            use_container_width=True,
+                            key="manual_merge_selected_players_btn",
+                        ):
+                            try:
+                                updated_records = apply_manual_merge_selection(
+                                    records=final_records,
+                                    left_player_name=manual_merge_left,
+                                    right_player_name=manual_merge_right,
+                                )
+                                updated_candidates = find_possible_duplicate_candidates(updated_records)
+
+                                reconciliation.auto_merged_records = list(updated_records)
+                                reconciliation.duplicate_candidates = updated_candidates
+
+                                st.session_state.multi_gc_final_records = updated_records
+                                st.session_state.multi_gc_reconciliation_result = reconciliation
+                                st.session_state.multi_gc_manual_merge_message = (
+                                    f"Merged {manual_merge_left} + {manual_merge_right}."
+                                )
+
+                                st.success(f"Merged {manual_merge_left} + {manual_merge_right}.")
+                                st.rerun()
+                            except Exception as exc:
+                                st.error(f"Could not manually merge players: {exc}")
+                    else:
+                        st.caption("At least two players are needed for a manual merge.")
+
+                with st.container(border=True):
+                    st.markdown("##### Finalize import")
+                    st.caption(
+                        "This sends the merged roster into Coach Lab, where you can still delete stale players, "
+                        "bench absences, and make coach adjustments."
+                    )
+
+                    if st.button(
+                        "Use merged roster in Coach Lab",
+                        use_container_width=True,
+                        type="primary",
+                        key="use_merged_roster_in_coach_lab_btn",
+                    ):
+                        try:
+                            finalize_multi_gc_import(
+                                final_records=final_records,
+                                file_names=st.session_state.get("multi_gc_uploaded_file_names", []),
+                            )
+                            st.success("Merged GameChanger roster imported into Coach Lab.")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"Could not finalize merged roster import: {exc}")
+
+        # -----------------------------------------------------------------
+        # Empty-team flow
+        # -----------------------------------------------------------------
+        with entry_tab_empty:
             st.markdown("#### Start Empty Team")
             st.caption("Build your roster from scratch inside Coach Lab.")
             st.markdown(
@@ -672,6 +1209,8 @@ def render_team_entry_panel(session_state: SessionStateSchema) -> None:
                 key="start_empty_roster_btn",
             ):
                 try:
+                    reset_multi_gc_ui_state()
+
                     configure_empty_manual_session(
                         st.session_state.optimizer_session_id,
                         data_source="manual_archetypes",

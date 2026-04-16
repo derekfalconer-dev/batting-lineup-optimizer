@@ -12,9 +12,11 @@ from core.archetypes import (
     PlayerTraits,
     create_player_from_archetype,
 )
+
 from core.player_factory import (
     build_team_from_archetypes,
     build_team_from_gamechanger,
+    build_team_from_gc_records,
     build_team_from_manual_traits,
 )
 
@@ -112,6 +114,16 @@ def _build_profiles_from_session_inputs(session: OptimizerSession) -> list[Playe
         )
         return list(bundle.profiles)
 
+    if session.data_source == "gc_merged":
+        if session.manual_roster is None:
+            return []
+
+        bundle = build_team_from_gc_records(
+            session.manual_roster,
+            source="gamechanger_merged_records",
+        )
+        return list(bundle.profiles)
+
     if session.data_source == "manual_archetypes":
         if session.manual_roster is not None:
             bundle = build_team_from_archetypes(session.manual_roster)
@@ -204,6 +216,41 @@ def configure_gc_session(
         manager.set_adjustments(session_id, {})
 
     manager.clear_result(session_id)
+    return _present_session(session)
+
+
+def configure_reconciled_gc_session(
+    session_id: str,
+    *,
+    merged_records: list[dict[str, Any]],
+    data_source: str = "gc_merged",
+) -> SessionStateSchema:
+    """
+    Configure a session from already-reconciled GameChanger records.
+
+    This is the backend seam for future multi-file import UI:
+    - parse many CSVs
+    - reconcile/merge records
+    - coach reviews duplicates
+    - final merged records seed Coach Lab
+    """
+    if data_source != "gc_merged":
+        raise ValueError("configure_reconciled_gc_session only supports data_source='gc_merged'")
+
+    manager = get_session_manager()
+
+    session = manager.set_data_source(
+        session_id,
+        data_source=data_source,
+        csv_path=None,
+        adjustments_path=None,
+        roster_path=None,
+    )
+
+    manager.set_adjustments(session_id, {})
+    manager.set_manual_roster(session_id, list(merged_records))
+    manager.clear_result(session_id)
+
     return _present_session(session)
 
 
@@ -365,7 +412,7 @@ def get_editable_roster(session_id: str) -> list[PlayerProfile]:
     if session.editable_profiles:
         return list(session.editable_profiles)
 
-    if session.data_source in {"gc", "gc_plus_tweaks", "manual_archetypes", "manual_traits"}:
+    if session.data_source in {"gc", "gc_plus_tweaks", "gc_merged", "manual_archetypes", "manual_traits"}:
         profiles = _build_profiles_from_session_inputs(session)
         manager.set_editable_roster(session_id, profiles=profiles)
 

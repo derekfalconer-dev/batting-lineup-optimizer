@@ -90,6 +90,29 @@ def build_profile_warnings(profile: Any) -> list[str]:
     if source_mode_value == "gc_nudged":
         warnings.append("Profile includes coach adjustments layered on top of GameChanger data.")
 
+    source_file_count = metadata.get("source_file_count") if isinstance(metadata, Mapping) else None
+    merged_record_count = metadata.get("merged_record_count") if isinstance(metadata, Mapping) else None
+
+    try:
+        source_file_count = int(source_file_count) if source_file_count is not None else None
+    except (TypeError, ValueError):
+        source_file_count = None
+
+    try:
+        merged_record_count = int(merged_record_count) if merged_record_count is not None else None
+    except (TypeError, ValueError):
+        merged_record_count = None
+
+    if source_file_count and source_file_count > 1:
+        warnings.append(
+            f"Profile was merged from {source_file_count} GameChanger files."
+        )
+
+    if merged_record_count and merged_record_count > 1:
+        warnings.append(
+            f"Profile combines {merged_record_count} matching GameChanger stat rows."
+        )
+
     return warnings
 
 
