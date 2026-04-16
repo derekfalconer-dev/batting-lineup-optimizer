@@ -186,6 +186,86 @@ def safe_get_results() -> WorkflowResponseSchema | None:
         return None
 
 
+def render_how_to_use_panel() -> None:
+    with st.container(border=True):
+        st.markdown("### How coaches are using this")
+        st.caption("The most common decisions this tool helps with right now.")
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            st.markdown("**1. Player absent tonight**")
+            st.caption(
+                "Bench the absent player, then optimize or simulate again to see how the order should shift."
+            )
+
+        with col2:
+            st.markdown("**2. Try a new player**")
+            st.caption(
+                "Add a player from an archetype, place him in the order, and simulate how he changes the lineup."
+            )
+
+        with col3:
+            st.markdown("**3. Compare your intuition**")
+            st.caption(
+                "Set up the order you like, simulate it, then compare it against the optimized order."
+            )
+
+
+def render_model_limitations_panel() -> None:
+    with st.expander("Model & Limitations", expanded=False):
+        st.markdown(
+            """
+**What this tool is doing**
+- It uses Monte Carlo simulation to play out many versions of the game and estimate run scoring outcomes.
+- It focuses on lineup-level outputs like average runs, median runs, and the chance of scoring at least a target number of runs.
+- It adjusts the environment based on your game settings such as inning length, run cap, diamond size, leadoffs, strategy, coaching style, and opponent strength.
+
+**What the player data means**
+- GameChanger imports are treated as directional input, not perfect truth.
+- The app converts GameChanger batting stats into internal 0–100 player traits, then builds simulator probabilities from those traits.
+- Coach edits and archetype players are meant to help when GameChanger data is sparse, noisy, or missing.
+
+**Important limitations**
+- Bad scorekeeping will still affect the imported baseline.
+- Small sample sizes can make the model noisy for individual players.
+- This is better for comparing lineup ideas than for pretending to predict exact game outcomes.
+- The optimized lineup is the best lineup found by the current fast search settings, not a mathematical proof that no better lineup exists.
+
+**Best use cases**
+- Rebuilding the order when a player is absent
+- Stress-testing your intuition lineup vs an optimized lineup
+- Seeing whether one weak bat or one added bat materially changes the offense
+- Getting directional guidance before making a final coaching call
+            """
+        )
+
+
+def render_team_loaded_next_steps(session_state: SessionStateSchema) -> None:
+    source_label_map = {
+        "gc": "GameChanger roster",
+        "gc_plus_tweaks": "GameChanger roster",
+        "manual_archetypes": "Manual roster",
+        "manual_traits": "Manual roster",
+    }
+    source_label = source_label_map.get(session_state.data_source, session_state.data_source or "Roster")
+
+    with st.container(border=True):
+        st.markdown(f"### Current team source: {source_label}")
+        st.caption("You are working in Coach Lab now. Change team source only if you want to replace the current roster.")
+
+        st.markdown("**Suggested next steps**")
+        st.markdown(
+            """
+1. Bench any absent players in **Coach Lab**  
+2. Reorder the lineup if you want to test your own intuition  
+3. Click **Simulate My Lineup** to test the order you built  
+4. Click **Save Scenario for Charts** if you want that lineup to show up below in the comparison charts  
+5. Click **Optimize Current Roster** to compare your version against the model’s recommendation  
+            """
+        )
+
+
 # =============================================================================
 # Rendering helpers
 # =============================================================================
@@ -517,24 +597,14 @@ def render_team_entry_panel(session_state: SessionStateSchema) -> None:
     )
 
     if session_state.data_source and not st.session_state.get("show_team_loader", True):
-        source_label_map = {
-            "gc": "GameChanger roster",
-            "gc_plus_tweaks": "GameChanger roster",
-            "manual_archetypes": "Manual roster",
-            "manual_traits": "Manual roster",
-        }
-        source_label = source_label_map.get(session_state.data_source, session_state.data_source)
+        loaded_col1, loaded_col2 = st.columns([3, 1])
 
-        with st.container(border=True):
-            c1, c2 = st.columns([3, 1])
+        with loaded_col1:
+            render_team_loaded_next_steps(session_state)
 
-            with c1:
-                st.markdown(f"### Current team source: {source_label}")
-                st.caption(
-                    "You are working in Coach Lab now. Change team source only if you want to replace the current roster."
-                )
-
-            with c2:
+        with loaded_col2:
+            with st.container(border=True):
+                st.markdown("### Team source")
                 if st.button(
                     "Change Team Source",
                     use_container_width=True,
@@ -1182,8 +1252,13 @@ def render_coach_lab_comparison_section(
         include_random_and_worst=False,
     )
 
-    st.markdown("### Scenario comparison")
-    st.caption("Compare saved lineup scenarios.")
+    st.markdown("### Compare lineup scenarios")
+    st.caption("Saved scenarios appear here. You can also include the current unsaved custom lineup.")
+
+    st.info(
+        "To get a lineup into these charts: set up the batting order you want, click **Simulate My Lineup**, "
+        "then click **Save Scenario for Charts**."
+    )
 
     enough_to_plot = len(compare_items) >= 1
 
@@ -1462,6 +1537,11 @@ def render_custom_lineup_result(
 
     st.markdown("### Your custom lineup result")
 
+    st.caption(
+        "This is the result for the batting order currently shown in Coach Lab. "
+        "If you want it to appear in comparison charts later, click **Save Scenario for Charts**."
+    )
+
     c1, c2, c3 = st.columns(3)
     c1.metric("Custom lineup average runs", f"{custom['mean_runs']:.2f}")
 
@@ -1511,6 +1591,16 @@ def render_coach_lab(
         "and test the custom batting order currently shown below."
     )
 
+    with st.expander("What the model is assuming in Coach Lab", expanded=False):
+        st.markdown(
+            """
+- This is a lineup comparison tool, not an exact score predictor.
+- GameChanger data is used as directional input and can be noisy if scorekeeping is inconsistent.
+- Coach edits and archetype players are meant to help when the imported data is sparse or misleading.
+- The most useful question is usually: **Does this lineup tend to look better than my other options?**
+            """
+        )
+
     editable_profiles = get_editable_roster_for_ui()
 
     benched_player_names = set(get_benched_player_names_for_ui())
@@ -1553,12 +1643,27 @@ def render_coach_lab(
                 unsafe_allow_html=True,
             )
 
-        st.markdown("##### Lineup actions")
+        st.markdown("##### Coach decision workflows")
         st.caption(
-            "Optimize Current Roster finds the best order for the active roster and loads it into the dashboard. "
-            "Simulate Current Custom Order tests the batting order currently shown below. "
-            "Save Current Scenario saves the current dashboard state for later comparison."
+            "Use this area for the three most common decisions: who is absent tonight, where a new player fits, "
+            "and whether your own lineup grades better or worse than the optimized one."
         )
+
+        workflow_cols = st.columns(3)
+        with workflow_cols[0]:
+            st.info("**Absent player tonight**\n\nBench him, then optimize or simulate again.")
+        with workflow_cols[1]:
+            st.info("**New player insertion**\n\nAdd a player below, place him in the order, then simulate.")
+        with workflow_cols[2]:
+            st.info("**My lineup vs optimized**\n\nSimulate your order, save it, then compare it to the optimized order in charts.")
+
+        st.caption(
+            "How to use these controls right now: "
+            "Bench an absent player in the active lineup below. "
+            "Use Add player from archetype to test a new player. "
+            "Reorder the lineup, click Simulate My Lineup, then click Save Scenario for Charts to compare it."
+        )
+        st.divider()
 
         lineup_action_col1, lineup_action_col2 = st.columns([1.45, 2.55])
 
@@ -1628,7 +1733,7 @@ def render_coach_lab(
 
             with action_cols[1]:
                 if st.button(
-                        "Simulate Current Custom Order",
+                        "Simulate My Lineup",
                         use_container_width=True,
                         type="primary",
                         key="dashboard_simulate_lineup",
@@ -1661,7 +1766,7 @@ def render_coach_lab(
 
             with action_cols[2]:
                 if st.button(
-                        "Save Current Scenario",
+                        "Save Scenario for Charts",
                         use_container_width=True,
                         key="dashboard_save_scenario",
                 ):
@@ -1698,7 +1803,7 @@ def render_coach_lab(
                         existing.append(f"Saved scenario: {saved_name}")
                         st.session_state.coach_lab_saved_scenario_messages = existing[-12:]
 
-                        st.success(f"Saved scenario: {saved_name}")
+                        st.success(f"Saved scenario: {saved_name}. It now appears in the comparison charts below.")
                         st.rerun()
                     except Exception as exc:
                         st.error(f"Could not save scenario: {exc}")
@@ -1706,9 +1811,37 @@ def render_coach_lab(
         workspace_mode = st.session_state.get("coach_lab_workspace_mode")
 
         if workspace_mode == "optimized":
-            st.success("Dashboard is currently showing the optimized order.")
+            st.markdown(
+                """
+                <div style="
+                    margin: 0.4rem 0 1rem 0;
+                    padding: 0.85rem 1rem;
+                    border-radius: 12px;
+                    background: rgba(50, 180, 120, 0.14);
+                    border: 1px solid rgba(50, 180, 120, 0.35);
+                    font-weight: 700;
+                ">
+                    Current workspace: Optimized lineup loaded into the dashboard
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
         elif workspace_mode == "custom":
-            st.info("Dashboard is currently showing a custom coach-edited order.")
+            st.markdown(
+                """
+                <div style="
+                    margin: 0.4rem 0 1rem 0;
+                    padding: 0.85rem 1rem;
+                    border-radius: 12px;
+                    background: rgba(80, 150, 220, 0.14);
+                    border: 1px solid rgba(80, 150, 220, 0.35);
+                    font-weight: 700;
+                ">
+                    Current workspace: Coach custom lineup
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
         st.markdown("##### Active batting order")
         if lineup_profiles:
@@ -1750,7 +1883,7 @@ def render_coach_lab(
             st.caption("Choose an archetype, enter a name, and click Add Player to begin building the roster.")
         else:
             st.markdown("##### Add player from archetype")
-            st.caption("Use this when you want to test a new player type in the roster.")
+            st.caption("Use this to test where a new player might fit in the lineup before game day.")
 
         add_col1, add_col2, add_col3, add_col4 = st.columns([1.2, 1.2, 0.8, 0.9])
 
@@ -2570,6 +2703,9 @@ def main() -> None:
 
     run_settings = render_sidebar(backend_session)
     st.session_state.run_settings_cache = run_settings
+
+    render_how_to_use_panel()
+    render_model_limitations_panel()
 
     render_team_entry_panel(backend_session)
     st.markdown("")
