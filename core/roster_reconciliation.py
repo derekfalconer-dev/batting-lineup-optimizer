@@ -46,6 +46,60 @@ RATE_FIELDS: tuple[str, ...] = (
 
 
 # ---------------------------------------------------------------------
+# Confidence helpers
+# ---------------------------------------------------------------------
+
+def confidence_level_from_pa(pa: int) -> str:
+    """
+    Coach-facing confidence label based on available plate appearances.
+
+    This is intentionally simple for the MVP:
+    - Low: very small sample, likely needs coach review
+    - Medium: usable directional input, still worth a coach check
+    - High: larger sample, stronger baseline
+    """
+    pa = int(pa or 0)
+
+    if pa < 15:
+        return "Low"
+    if pa < 40:
+        return "Medium"
+    return "High"
+
+
+def confidence_badge_from_pa(pa: int) -> str:
+    level = confidence_level_from_pa(pa)
+    if level == "Low":
+        return "🔴 Low"
+    if level == "Medium":
+        return "🟡 Medium"
+    return "🟢 High"
+
+
+def confidence_action_from_pa(pa: int) -> str:
+    """
+    Coach-facing next step.
+    This should guide behavior, not undermine trust.
+    """
+    level = confidence_level_from_pa(pa)
+
+    if level == "Low":
+        return (
+            "Use the imported stats as a starting point, then manually inspect and tweak "
+            "this player in Coach Lab before relying on the lineup recommendation."
+        )
+    if level == "Medium":
+        return (
+            "Usable directional input. Coach review is still a good idea if this player’s "
+            "recent quality or role has changed."
+        )
+    return (
+        "Strongest data baseline on the roster. Still directional, but usually fine to use "
+        "without major manual adjustment unless the coach knows something recent has changed."
+    )
+
+
+# ---------------------------------------------------------------------
 # Data models
 # ---------------------------------------------------------------------
 
@@ -337,6 +391,9 @@ def merge_gc_record_group(
     merged["source_file_count"] = len(source_files)
     merged["merged_from_names"] = source_names
     merged["merged_record_count"] = len(group)
+    merged["confidence"] = confidence_level_from_pa(pa)
+    merged["confidence_badge"] = confidence_badge_from_pa(pa)
+    merged["confidence_action"] = confidence_action_from_pa(pa)
 
     merged["raw_row"] = None
     merged["raw_rows"] = [item.get("raw_row") for item in group if item.get("raw_row") is not None]

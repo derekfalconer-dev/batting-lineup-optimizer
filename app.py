@@ -262,6 +262,7 @@ def build_multi_gc_preview_rows(records: list[dict]) -> list[dict]:
                 "BB%": f"{bb_rate:.1%}",
                 "Files": int(record.get("source_file_count", 0) or 0),
                 "Merged Rows": int(record.get("merged_record_count", 0) or 0),
+                "Confidence": record.get("confidence_badge", record.get("confidence", "")),
             }
         )
 
@@ -482,6 +483,9 @@ def render_model_limitations_panel() -> None:
 - GameChanger imports are treated as directional input, not perfect truth.
 - The app converts GameChanger batting stats into internal 0–100 player traits, then builds simulator probabilities from those traits.
 - Coach edits and archetype players are meant to help when GameChanger data is sparse, noisy, or missing.
+- Each player may show plate appearances, number of source files, and a confidence label.
+- Low confidence does not mean “do not use.” It means the imported data is a weaker baseline and Coach Lab review is recommended.
+- When confidence is low, the best workflow is to inspect that player, make a small trait adjustment or choose a better-fit archetype, then re-run the simulation.
 
 **Important limitations**
 - Bad scorekeeping will still affect the imported baseline.
@@ -494,6 +498,7 @@ def render_model_limitations_panel() -> None:
 - Stress-testing your intuition lineup vs an optimized lineup
 - Seeing whether one weak bat or one added bat materially changes the offense
 - Getting directional guidance before making a final coaching call
+- Using imported stats as a baseline, then tightening up low-confidence players with coach knowledge
             """
         )
 
@@ -1409,6 +1414,116 @@ def player_editor_key(name: str) -> str:
     )
 
 
+def get_profile_metadata(profile) -> dict:
+    metadata = getattr(profile, "metadata", None)
+    return dict(metadata or {}) if isinstance(metadata, dict) else {}
+
+
+def profile_confidence(profile) -> str | None:
+    metadata = get_profile_metadata(profile)
+    value = metadata.get("confidence")
+    if value not in (None, ""):
+        return str(value)
+
+    pa = profile_pa(profile)
+    if pa is None:
+        return None
+    if pa < 15:
+        return "Low"
+    if pa < 40:
+        return "Medium"
+    return "High"
+
+
+def profile_pa(profile) -> int | None:
+    metadata = get_profile_metadata(profile)
+    value = metadata.get("pa")
+    if value in (None, "", "-"):
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def profile_source_file_count(profile) -> int | None:
+    metadata = get_profile_metadata(profile)
+    value = metadata.get("source_file_count")
+    if value in (None, "", "-"):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def profile_confidence_action(profile) -> str | None:
+    metadata = get_profile_metadata(profile)
+    value = metadata.get("confidence_action")
+    if value not in (None, ""):
+        return str(value)
+
+    pa = profile_pa(profile)
+    if pa is None:
+        return None
+    if pa < 15:
+        return (
+            "Use the imported stats as a starting point, then manually inspect and tweak "
+            "this player in Coach Lab before relying heavily on the recommendation."
+        )
+    if pa < 40:
+        return (
+            "Usable directional input. Coach review is still a good idea if this player’s "
+            "recent quality or role has changed."
+        )
+    return (
+        "Stronger baseline on the roster. Usually fine to use as-is unless you know "
+        "something recent has changed."
+    )
+
+
+def profile_confidence_badge(profile) -> str:
+    metadata = get_profile_metadata(profile)
+    badge = metadata.get("confidence_badge")
+    if badge not in (None, ""):
+        return str(badge)
+
+    confidence = profile_confidence(profile)
+    if confidence == "Low":
+        return "🔴 Low"
+    if confidence == "Medium":
+        return "🟡 Medium"
+    if confidence == "High":
+        return "🟢 High"
+
+    # fallback from PA if confidence metadata is missing
+    pa = profile_pa(profile)
+    if pa is None:
+        return "—"
+    if pa < 15:
+        return "🔴 Low"
+    if pa < 40:
+        return "🟡 Medium"
+    return "🟢 High"
+
+
+def build_confidence_summary(editable_profiles: list) -> tuple[int, int, int]:
+    low = 0
+    medium = 0
+    high = 0
+
+    for profile in editable_profiles:
+        confidence = profile_confidence(profile)
+        if confidence == "Low":
+            low += 1
+        elif confidence == "Medium":
+            medium += 1
+        elif confidence == "High":
+            high += 1
+
+    return low, medium, high
+
+
 def clear_lineup_order_widget_state() -> None:
     """
     Clear cached lineup-order widget values so they rebuild from the latest
@@ -1489,15 +1604,41 @@ def render_expandable_player_editor(
 
     archetype_label = format_archetype_label(archetype_value)
 
+    pa_value = profile_pa(profile)
+    source_file_count = profile_source_file_count(profile)
+    confidence_badge = profile_confidence_badge(profile)
+
+    confidence_bits = []
+    if pa_value is not None:
+        confidence_bits.append(f"PA {pa_value}")
+    if source_file_count is not None:
+        confidence_bits.append(f"Files {source_file_count}")
+    if confidence_badge != "—":
+        confidence_bits.append(confidence_badge)
+
+    confidence_text = " | ".join(confidence_bits)
+    confidence_prefix = f"{confidence_text} | " if confidence_text else ""
+
     summary = (
         f"{slot_label} • {profile.name} • {archetype_label} • {status_label} | "
-        f"C {effective_traits.contact:.0f}  "
-        f"P {effective_traits.power:.0f}  "
-        f"S {effective_traits.speed:.0f}  "
-        f"Disc {effective_traits.plate_discipline:.0f}"
+        f"{confidence_prefix}"
+        f"C {effective_traits.contact:.0f} P {effective_traits.power:.0f} "
+        f"S {effective_traits.speed:.0f} Disc {effective_traits.plate_discipline:.0f}"
     )
 
     with st.expander(summary, expanded=False):
+
+        confidence_value = profile_confidence(profile)
+        confidence_action = profile_confidence_action(profile)
+
+        if confidence_value == "Low" and confidence_action:
+            st.info(
+                f"{profile_confidence_badge(profile)} {confidence_action} "
+                "Recommended workflow: inspect this player, make a small trait tweak or choose a better-fit archetype if needed, then re-simulate or re-optimize."
+            )
+        elif confidence_value == "Medium" and confidence_action:
+            st.caption(f"{profile_confidence_badge(profile)} {confidence_action}")
+
         action_cols = st.columns([0.9, 1, 1, 1])
 
         if not is_benched:
@@ -2381,6 +2522,60 @@ def render_coach_lab(
                 """,
                 unsafe_allow_html=True,
             )
+
+            low_conf_count, medium_conf_count, high_conf_count = build_confidence_summary(editable_profiles)
+
+            if low_conf_count > 0 or medium_conf_count > 0 or high_conf_count > 0:
+                with st.container(border=True):
+                    st.markdown("#### Roster data confidence")
+                    st.caption(
+                        "How many players on your roster are this confidence level. Yellow and red players are good candidates for a quick profile check and small coach tweaks before simulating."
+                    )
+
+                    conf_col1, conf_col2, conf_col3 = st.columns(3)
+
+                    with conf_col1:
+                        if low_conf_count:
+                            st.write(f"🔴 Low: {low_conf_count}")
+                        else:
+                            st.write("🔴 Low: 0")
+
+                    with conf_col2:
+                        if medium_conf_count:
+                            st.write(f"🟡 Medium: {medium_conf_count}")
+                        else:
+                            st.write("🟡 Medium: 0")
+
+                    with conf_col3:
+                        if high_conf_count:
+                            st.write(f"🟢 High: {high_conf_count}")
+                        else:
+                            st.write("🟢 High: 0")
+
+                    if low_conf_count > 0:
+                        st.markdown(
+                            """
+                    **Recommended workflow for low-confidence players**
+                    1. Open that player in Coach Lab  
+                    2. Check whether the imported profile matches what you see in real games  
+                    3. Make a small trait edit or swap to a more realistic archetype if needed  
+                    4. Re-simulate or re-optimize the lineup  
+                            """
+                        )
+
+                    elif medium_conf_count > 0:
+                        left, center, right = st.columns([1, 2, 1])
+                        with center:
+                            st.caption(
+                                "Most players currently have moderate sample sizes. A quick inspection of detailed profiles can help you fine tune the lineup before simulating."
+                            )
+
+                    elif high_conf_count > 0:
+                        left, center, right = st.columns([1, 2, 1])
+                        with center:
+                            st.caption(
+                                "Most players have strong data behind them, so the imported profiles should be a solid starting point."
+                            )
 
         st.markdown("##### Active batting order")
         if lineup_profiles:

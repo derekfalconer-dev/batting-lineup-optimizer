@@ -4,6 +4,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from core.roster_reconciliation import (
+    confidence_action_from_pa,
+    confidence_badge_from_pa,
+    confidence_level_from_pa,
+)
+
 from core.archetypes import (
     Handedness,
     PlayerArchetype,
@@ -12,8 +18,14 @@ from core.archetypes import (
     TraitAdjustment,
     create_player_from_archetype,
 )
+
 from core.gc_loader import load_gamechanger_records
 from core.models import Player
+from core.roster_reconciliation import (
+    confidence_action_from_pa,
+    confidence_badge_from_pa,
+    confidence_level_from_pa,
+)
 
 
 @dataclass(slots=True)
@@ -51,13 +63,45 @@ def profile_from_gc_record(
     metadata: Mapping[str, Any] | None = None,
 ) -> PlayerProfile:
     merged_meta = dict(metadata or {})
+
+    pa_value = record.get("PA")
+    try:
+        resolved_pa = int(float(pa_value)) if pa_value not in (None, "", "-") else None
+    except (TypeError, ValueError):
+        resolved_pa = None
+
+    resolved_confidence = record.get("confidence")
+    resolved_badge = record.get("confidence_badge")
+    resolved_action = record.get("confidence_action")
+
+    # Fallback for single-file GC imports:
+    # if confidence fields are not already present, derive them from PA.
+    if resolved_pa is not None and resolved_confidence in (None, ""):
+        resolved_confidence = confidence_level_from_pa(resolved_pa)
+
+    if resolved_pa is not None and resolved_badge in (None, ""):
+        resolved_badge = confidence_badge_from_pa(resolved_pa)
+
+    if resolved_pa is not None and resolved_action in (None, ""):
+        resolved_action = confidence_action_from_pa(resolved_pa)
+
     merged_meta.update(
         {
             "source_file": record.get("source_file"),
+            "source_files": record.get("source_files", []),
+            "source_file_count": record.get("source_file_count") if record.get("source_file_count") not in (
+            None, "") else 1,
+            "merged_record_count": record.get("merged_record_count"),
+            "merged_from_names": record.get("merged_from_names", []),
             "number": record.get("number"),
             "first": record.get("first"),
             "last": record.get("last"),
             "raw_row": record.get("raw_row"),
+            "raw_rows": record.get("raw_rows", []),
+            "pa": resolved_pa,
+            "confidence": resolved_confidence,
+            "confidence_badge": resolved_badge,
+            "confidence_action": resolved_action,
         }
     )
 

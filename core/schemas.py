@@ -62,6 +62,12 @@ class PlayerProfileSchema:
     adjustment: dict[str, float]
     effective_traits: TraitSetSchema
 
+    plate_appearances: int | None = None
+    source_file_count: int | None = None
+    confidence: str | None = None
+    confidence_badge: str | None = None
+    confidence_action: str | None = None
+
     metadata: dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
 

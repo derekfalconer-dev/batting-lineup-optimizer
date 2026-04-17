@@ -53,13 +53,21 @@ def present_adjustment(adjustment: Any) -> dict[str, float]:
     return {str(k): float(v) for k, v in raw.items()}
 
 
+def _safe_int_or_none(value: Any) -> int | None:
+    if value in (None, "", "-"):
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
 def build_profile_warnings(profile: Any) -> list[str]:
     """
     Coach-facing warnings / trust flags.
 
-    For now, these are intentionally light-touch and based on currently
-    available metadata. We can expand this once we add deeper confidence
-    modeling.
+    The goal is not to say the data is useless.
+    The goal is to tell the coach what to do next.
     """
     warnings: list[str] = []
 
@@ -67,19 +75,22 @@ def build_profile_warnings(profile: Any) -> list[str]:
     source_mode_value = getattr(source_mode, "value", str(source_mode)) if source_mode is not None else "unknown"
 
     metadata = getattr(profile, "metadata", {}) or {}
-    gc_row = metadata.get("gc_row", {}) if isinstance(metadata, Mapping) else {}
-    pa = gc_row.get("PA")
+    pa_value = _safe_int_or_none(metadata.get("pa"))
 
-    try:
-        pa_value = int(float(pa)) if pa not in (None, "", "-") else None
-    except (TypeError, ValueError):
-        pa_value = None
+    if pa_value is None:
+        gc_row = metadata.get("gc_row", {}) if isinstance(metadata, Mapping) else {}
+        pa_value = _safe_int_or_none(gc_row.get("PA"))
 
-    if pa_value is not None:
-        if pa_value < 10:
-            warnings.append("Very low sample size; GameChanger rates may be noisy.")
-        elif pa_value < 20:
-            warnings.append("Limited sample size; coach review is recommended.")
+    confidence = str(metadata.get("confidence") or "").strip()
+
+    if confidence == "Low":
+        warnings.append(
+            "Low-confidence baseline: use Coach Lab to inspect this player and adjust traits if the imported stats do not match what you see on the field."
+        )
+    elif confidence == "Medium":
+        warnings.append(
+            "Medium-confidence baseline: directional input is useful here, but coach review can still improve accuracy."
+        )
 
     if source_mode_value == "manual_archetype":
         warnings.append("Profile is based on archetype scaffolding rather than measured stats.")
@@ -90,18 +101,8 @@ def build_profile_warnings(profile: Any) -> list[str]:
     if source_mode_value == "gc_nudged":
         warnings.append("Profile includes coach adjustments layered on top of GameChanger data.")
 
-    source_file_count = metadata.get("source_file_count") if isinstance(metadata, Mapping) else None
-    merged_record_count = metadata.get("merged_record_count") if isinstance(metadata, Mapping) else None
-
-    try:
-        source_file_count = int(source_file_count) if source_file_count is not None else None
-    except (TypeError, ValueError):
-        source_file_count = None
-
-    try:
-        merged_record_count = int(merged_record_count) if merged_record_count is not None else None
-    except (TypeError, ValueError):
-        merged_record_count = None
+    source_file_count = _safe_int_or_none(metadata.get("source_file_count"))
+    merged_record_count = _safe_int_or_none(metadata.get("merged_record_count"))
 
     if source_file_count and source_file_count > 1:
         warnings.append(
@@ -124,6 +125,8 @@ def present_player_profile(profile: Any) -> PlayerProfileSchema:
     archetype = getattr(profile, "archetype", None)
     source_mode = getattr(profile, "source_mode", None)
 
+    metadata = dict(getattr(profile, "metadata", {}) or {})
+
     return PlayerProfileSchema(
         name=str(getattr(profile, "name")),
         handedness=getattr(handedness, "value", str(handedness)),
@@ -133,7 +136,12 @@ def present_player_profile(profile: Any) -> PlayerProfileSchema:
         base_traits=present_trait_set(getattr(profile, "base_traits")),
         adjustment=present_adjustment(getattr(profile, "adjustment", None)),
         effective_traits=present_trait_set(getattr(profile, "effective_traits")),
-        metadata=dict(getattr(profile, "metadata", {}) or {}),
+        plate_appearances=_safe_int_or_none(metadata.get("pa")),
+        source_file_count=_safe_int_or_none(metadata.get("source_file_count")),
+        confidence=str(metadata.get("confidence")) if metadata.get("confidence") not in (None, "") else None,
+        confidence_badge=str(metadata.get("confidence_badge")) if metadata.get("confidence_badge") not in (None, "") else None,
+        confidence_action=str(metadata.get("confidence_action")) if metadata.get("confidence_action") not in (None, "") else None,
+        metadata=metadata,
         warnings=build_profile_warnings(profile),
     )
 
