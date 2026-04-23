@@ -176,6 +176,7 @@ class CoachSummarySchema:
     original_lineup: list[str]
 
     bullets: list[str] = field(default_factory=list)
+    optimizer_meta: dict[str, Any] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------
@@ -243,6 +244,66 @@ class WorkflowResponseSchema:
 
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------
+# Import preview / apply schemas
+# ---------------------------------------------------------------------
+
+@dataclass(slots=True)
+class ImportPreviewRowSchema:
+    """
+    One incoming player row shown during Add Additional GC Data preview.
+    """
+
+    incoming_name: str
+    normalized_name: str
+    pa: int
+    source_file: str
+
+    classification: str
+    # allowed values for v1:
+    # - matched_existing
+    # - new_player
+    # - ambiguous_match
+
+    matched_player_id: str | None = None
+    matched_player_name: str | None = None
+
+    suggested_action: str = "skip"
+    # allowed values for v1:
+    # - merge_existing
+    # - add_new
+    # - skip
+
+    candidate_player_ids: list[str] = field(default_factory=list)
+    candidate_player_names: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class ImportPreviewSummarySchema:
+    files_processed: int
+    incoming_records: int
+    matched_existing_count: int
+    new_player_count: int
+    ambiguous_match_count: int
+    plate_appearances_available: int
+
+
+@dataclass(slots=True)
+class ImportPreviewSchema:
+    rows: list[ImportPreviewRowSchema] = field(default_factory=list)
+    summary: ImportPreviewSummarySchema | None = None
+
+
+@dataclass(slots=True)
+class ImportApplySummarySchema:
+    files_processed: int
+    incoming_records: int
+    merged_existing_count: int
+    added_new_count: int
+    skipped_count: int
+    plate_appearances_added: int
 
 
 # ---------------------------------------------------------------------

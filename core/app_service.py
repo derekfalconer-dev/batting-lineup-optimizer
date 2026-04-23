@@ -166,6 +166,7 @@ def run_optimizer_workflow(
         rules=rules,
         target_runs=target_runs,
         seed=101,
+        n_games=optimizer_defaults["refine_games"],
     )
 
     random_players = players[:]
@@ -176,6 +177,7 @@ def run_optimizer_workflow(
         rules=rules,
         target_runs=target_runs,
         seed=202,
+        n_games=optimizer_defaults["refine_games"],
     )
 
     worst_players = list(reversed(sorted(
@@ -189,6 +191,7 @@ def run_optimizer_workflow(
         rules=rules,
         target_runs=target_runs,
         seed=303,
+        n_games=optimizer_defaults["refine_games"],
     )
 
     comparison_set = [
@@ -209,6 +212,7 @@ def run_optimizer_workflow(
         profiles=profiles,
         team_source=team.source,
         target_runs=target_runs,
+        optimizer_results=results,
     )
 
     raw_result = WorkflowResult(
@@ -540,6 +544,7 @@ def _build_summary(
     profiles: list[Any],
     team_source: str,
     target_runs: float,
+    optimizer_results: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     optimized_prob = optimized["prob_ge_target"]
     original_prob = original["prob_ge_target"]
@@ -564,6 +569,7 @@ def _build_summary(
         "optimized_lineup": optimized["lineup"],
         "original_lineup": original["lineup"],
         "source_mode_counts": source_mode_counts,
+        "optimizer_meta": dict((optimizer_results or {}).get("_meta", {})),
     }
 
 

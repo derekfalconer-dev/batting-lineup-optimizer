@@ -375,6 +375,7 @@ def present_coach_summary(
             original=original,
             summary=summary,
         ),
+        optimizer_meta=dict(summary.get("optimizer_meta", {})),
     )
 
 

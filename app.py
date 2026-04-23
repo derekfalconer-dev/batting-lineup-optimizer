@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Any
 import altair as alt
 import pandas as pd
 
@@ -16,12 +16,13 @@ from core.models import (
     OpponentLevel,
 )
 
-from core.archetypes import PlayerArchetype
+from core.archetypes import PlayerArchetype, get_archetype_definition
 
 from core.api_service import (
     add_player_from_archetype,
     apply_lineup_to_active_roster,
     bench_player,
+    revert_player_to_imported_gc_baseline,
     clear_all_adjustments,
     clear_custom_lineup,
     clear_player_adjustment,
@@ -44,11 +45,14 @@ from core.api_service import (
     run_optimization,
     save_current_scenario,
     set_custom_lineup,
+    set_custom_lineup_result_payload,
     set_player_adjustment,
     set_player_order,
     unbench_player,
     update_player_identity,
     update_player_traits,
+    apply_gamechanger_data_addition,
+    preview_gamechanger_data_addition,
 )
 
 from core.chart_data import (
@@ -79,7 +83,27 @@ from core.schemas import (
 # =============================================================================
 
 APP_TITLE = "Batting Lineup Optimizer"
-APP_SUBTITLE = "Monte Carlo lineup optimization for baseball coaches"
+APP_SUBTITLE = "Lineup optimization for baseball coaches"
+NUDGE_TOOLTIP_BY_FIELD = {
+    "contact": "Small adjustment to how often the hitter puts the ball in play and reaches safely. Higher values usually mean more balls in play, more hits, and fewer strikeouts.",
+    "power": "Small adjustment to extra-base hit and home run upside. Higher values increase damage potential when the hitter connects.",
+    "speed": "Small adjustment to foot speed and pressure on the bases. Higher values improve stolen-base pressure and taking extra bases.",
+    "plate_discipline": "Small adjustment to swing decisions and walk potential. Higher values help the hitter avoid weak swings and earn more free passes.",
+}
+
+MANUAL_OVERRIDE_TOOLTIP_BY_FIELD = {
+    "contact": "How reliably this hitter puts the ball in play and gets on base via contact. Higher values generally improve batting average and reduce empty at-bats.",
+    "power": "How much damage this hitter does on contact. Higher values increase doubles, triples, and home run upside.",
+    "speed": "Raw running speed. Higher values help with steals, infield pressure, and taking extra bases.",
+    "baserunning": "How well this player advances on the bases. Higher values improve decisions like first-to-third, scoring from second, and pressure plays.",
+    "plate_discipline": "How selective and controlled the hitter is at the plate. Higher values improve at-bat quality and walk rate.",
+    "strikeout_tendency": "How often the hitter swings through or gets put away. Higher values mean more strikeouts and fewer balls in play.",
+    "walk_skill": "Direct walk ability. Higher values increase the chance the hitter reaches base without a hit.",
+    "chase_tendency": "How often the hitter expands the zone. Higher values mean more chasing of pitches outside the strike zone.",
+    "aggression": "How assertive the player is on the bases and in pressure situations. Higher values increase push-the-action behavior.",
+    "clutch": 'A light situational trait intended to reflect performance under pressure. Right now it is more of a soft modifier than a major driver.',
+    "sacrifice_ability": "How capable the player is at productive outs, bunts, and move-the-runner style execution. Higher values help small-ball situations.",
+}
 
 
 # =============================================================================
@@ -120,7 +144,7 @@ def ensure_ui_state() -> None:
         st.session_state.coach_lab_saved_nudge_messages = []
 
     if "show_team_loader" not in st.session_state:
-        st.session_state.show_team_loader = True
+        st.session_state.show_team_loader = False
 
     if "active_results_tab" not in st.session_state:
         st.session_state.active_results_tab = "Players"
@@ -151,6 +175,83 @@ def ensure_ui_state() -> None:
 
     if "multi_gc_manual_merge_message" not in st.session_state:
         st.session_state.multi_gc_manual_merge_message = None
+
+    if "additional_gc_preview" not in st.session_state:
+        st.session_state.additional_gc_preview = None
+
+    if "additional_gc_uploaded_file_names" not in st.session_state:
+        st.session_state.additional_gc_uploaded_file_names = []
+
+    if "additional_gc_apply_summary" not in st.session_state:
+        st.session_state.additional_gc_apply_summary = None
+
+    if "run_status_tile" not in st.session_state:
+        st.session_state.run_status_tile = None
+
+    if "selected_team_id" not in st.session_state:
+        st.session_state.selected_team_id = None
+
+    if "new_team_name" not in st.session_state:
+        st.session_state.new_team_name = ""
+
+    if "clear_new_team_name_input" not in st.session_state:
+        st.session_state.clear_new_team_name_input = False
+
+    if "rename_team_name_input" not in st.session_state:
+        st.session_state.rename_team_name_input = ""
+
+    if "show_team_management" not in st.session_state:
+        st.session_state.show_team_management = False
+
+    if "sync_team_selector_dropdown" not in st.session_state:
+        st.session_state.sync_team_selector_dropdown = False
+
+
+def extract_metrics(result) -> dict:
+    """
+    Normalize either:
+    - a flat saved-scenario lineup result dict
+    - an object with a .metrics attribute
+    - an object whose .metrics is itself a dict-like payload
+    """
+    if result is None:
+        return {}
+
+    if isinstance(result, dict):
+        # Saved scenarios are now stored as a flat dict:
+        # {
+        #   "display_name": ...,
+        #   "lineup": [...],
+        #   "mean_runs": ...,
+        #   ...
+        # }
+        if "mean_runs" in result or "prob_ge_target" in result:
+            return result
+
+        nested = result.get("metrics")
+        if isinstance(nested, dict):
+            return nested
+
+        return {}
+
+    metrics_obj = getattr(result, "metrics", None)
+    if metrics_obj is None:
+        return {}
+
+    if isinstance(metrics_obj, dict):
+        return metrics_obj
+
+    return {
+        "mean_runs": getattr(metrics_obj, "mean_runs", 0.0),
+        "median_runs": getattr(metrics_obj, "median_runs", 0.0),
+        "std_runs": getattr(metrics_obj, "std_runs", 0.0),
+        "prob_ge_target": getattr(metrics_obj, "prob_ge_target", 0.0),
+        "sortino": getattr(metrics_obj, "sortino", 0.0),
+        "p10_runs": getattr(metrics_obj, "p10_runs", 0.0),
+        "p90_runs": getattr(metrics_obj, "p90_runs", 0.0),
+        "n_games": getattr(metrics_obj, "n_games", 0),
+        "target_runs": getattr(metrics_obj, "target_runs", 4.0),
+    }
 
 
 def get_backend_session() -> SessionStateSchema:
@@ -189,6 +290,398 @@ def get_backend_session() -> SessionStateSchema:
         return session_state
 
 
+def reset_team_scoped_ui_state() -> None:
+    """
+    Clear UI caches/results that should not bleed across teams.
+    """
+    st.session_state.coach_lab_player_profiles_cache = []
+    st.session_state.coach_lab_last_custom_eval = None
+    st.session_state.coach_lab_workspace_mode = None
+    st.session_state.coach_lab_saved_nudge_messages = []
+    st.session_state.saved_scenarios_cache = []
+    st.session_state.scenario_rename_target = None
+    st.session_state.last_completed_results = None
+    st.session_state.run_status_tile = None
+    st.session_state.coach_lab_saved_scenario_messages = []
+    st.session_state.multi_gc_reconciliation_result = None
+    st.session_state.multi_gc_final_records = None
+    st.session_state.multi_gc_uploaded_file_names = []
+    st.session_state.multi_gc_import_summary = None
+    st.session_state.multi_gc_manual_merge_message = None
+    st.session_state.show_team_loader = True
+    clear_lineup_order_widget_state()
+
+
+# NOTE:
+# Team persistence now lives behind SessionManager -> TeamRepository.
+# Streamlit UI should avoid direct assumptions about JSON/file-backed storage.
+def get_team_records_for_ui() -> list:
+    try:
+        from core.session_manager import get_session_manager
+        from core.auth import get_current_user
+
+        manager = get_session_manager()
+        current_user = get_current_user()
+
+        return manager.list_teams_for_user(current_user.user_id)
+    except Exception:
+        return []
+
+
+def render_login_gate() -> None:
+    with st.container(border=True):
+        st.markdown("### Sign in")
+        st.caption("This app requires login so each coach only sees their own teams.")
+
+        if st.button(
+            "Log in with Google",
+            type="primary",
+            use_container_width=True,
+            key="login_with_google_button",
+        ):
+            st.login()
+
+
+def require_authenticated_user() -> None:
+    if not getattr(st.user, "is_logged_in", False):
+        render_login_gate()
+        st.stop()
+
+
+def render_signed_in_banner() -> None:
+    from core.auth import get_current_user
+
+    try:
+        current_user = get_current_user()
+    except Exception:
+        return
+
+    with st.container(border=True):
+        left_col, right_col = st.columns([4, 1])
+
+        with left_col:
+            st.caption(
+                f"Signed in as {current_user.display_name} ({current_user.email})"
+            )
+
+        with right_col:
+            if st.button("Log out", use_container_width=True, key="logout_button"):
+                from core.session_manager import get_session_manager
+
+                try:
+                    manager = get_session_manager()
+                    manager.flush_session_team(st.session_state.optimizer_session_id)
+                except Exception:
+                    # Logout should still proceed even if the explicit flush fails.
+                    pass
+
+                # Clear local UI state that should not survive user switching.
+                for key in [
+                    "selected_team_id",
+                    "team_selector_dropdown",
+                    "sync_team_selector_dropdown",
+                    "new_team_name",
+                    "rename_team_name_input",
+                    "show_team_management",
+                    "show_team_loader",
+                    "coach_lab_player_profiles_cache",
+                    "coach_lab_last_custom_eval",
+                    "coach_lab_workspace_mode",
+                    "coach_lab_saved_nudge_messages",
+                    "saved_scenarios_cache",
+                    "scenario_rename_target",
+                    "last_completed_results",
+                    "coach_lab_saved_scenario_messages",
+                    "multi_gc_reconciliation_result",
+                    "multi_gc_final_records",
+                    "multi_gc_uploaded_file_names",
+                    "multi_gc_import_summary",
+                    "multi_gc_manual_merge_message",
+                    "additional_gc_preview",
+                    "additional_gc_uploaded_file_names",
+                    "additional_gc_apply_summary",
+                    "run_status_tile",
+                ]:
+                    st.session_state.pop(key, None)
+
+                st.logout()
+
+
+def ensure_selected_team() -> None:
+    """
+    Make sure the current Streamlit session is attached to a valid team
+    owned by the current user.
+    """
+    from core.session_manager import get_session_manager
+    from core.auth import get_current_user
+
+    manager = get_session_manager()
+    current_user = get_current_user()
+    if not current_user.user_id:
+        raise ValueError("Authenticated user is missing a stable user_id.")
+    session_obj = manager.get_session(st.session_state.optimizer_session_id)
+    team_summaries = manager.list_team_summaries_for_user(current_user.user_id)
+
+    if not team_summaries:
+        team = manager.create_team(
+            owner_user_id=current_user.user_id,
+            team_name="Untitled Team",
+        )
+        manager.attach_session_to_team(session_obj.session_id, team_id=team.team_id)
+        st.session_state.selected_team_id = team.team_id
+        st.session_state.sync_team_selector_dropdown = True
+        return
+
+    valid_team_ids = {team["team_id"] for team in team_summaries}
+    selected_team_id = st.session_state.get("selected_team_id")
+
+    if selected_team_id and selected_team_id in valid_team_ids:
+        if session_obj.team_id != selected_team_id:
+            manager.attach_session_to_team(session_obj.session_id, team_id=selected_team_id)
+        return
+
+    if session_obj.team_id and session_obj.team_id in valid_team_ids:
+        st.session_state.selected_team_id = session_obj.team_id
+        st.session_state.sync_team_selector_dropdown = True
+        return
+
+    first_team = team_summaries[0]
+    manager.attach_session_to_team(session_obj.session_id, team_id=first_team["team_id"])
+    st.session_state.selected_team_id = first_team["team_id"]
+    st.session_state.sync_team_selector_dropdown = True
+
+
+def delete_active_team_and_recover() -> None:
+    """
+    Delete the currently selected team, then attach the session to another team
+    if one exists. If none remain, create a fresh Untitled Team.
+    """
+
+    from core.session_manager import get_session_manager
+
+    manager = get_session_manager()
+    session_obj = manager.get_session(st.session_state.optimizer_session_id)
+    selected_team_id = st.session_state.get("selected_team_id")
+
+    if not selected_team_id:
+        raise ValueError("No active team is selected.")
+
+    from core.auth import get_current_user
+    current_user = get_current_user()
+    manager.delete_team_for_user(selected_team_id, current_user.user_id)
+    remaining = manager.list_teams_for_user(current_user.user_id)
+
+    if remaining:
+        non_untitled = [
+            team for team in remaining
+            if team.team_name.strip().lower() != "untitled team"
+        ]
+        next_team = non_untitled[0] if non_untitled else remaining[0]
+        manager.attach_session_to_team(session_obj.session_id, team_id=next_team.team_id)
+        st.session_state.selected_team_id = next_team.team_id
+    else:
+        new_team = manager.create_team(
+            owner_user_id=current_user.user_id,
+            team_name="Untitled Team",
+        )
+        manager.attach_session_to_team(session_obj.session_id, team_id=new_team.team_id)
+        st.session_state.selected_team_id = new_team.team_id
+
+    st.session_state.sync_team_selector_dropdown = True
+    reset_team_scoped_ui_state()
+
+
+def prune_placeholder_untitled_team() -> None:
+    """
+    Remove empty placeholder 'Untitled Team' records once real teams exist.
+
+    We keep one Untitled Team only as a bootstrap fallback when there are no
+    other teams. If a real team exists, empty Untitled placeholders should go away.
+    """
+    from core.session_manager import get_session_manager
+
+    manager = get_session_manager()
+    from core.auth import get_current_user
+    current_user = get_current_user()
+    team_summaries = manager.list_team_summaries_for_user(current_user.user_id)
+
+    if len(team_summaries) <= 1:
+        return
+
+    untitled_candidates = [
+        team for team in team_summaries
+        if str(team["team_name"]).strip().lower() == "untitled team"
+    ]
+
+    real_teams = [
+        team for team in team_summaries
+        if str(team["team_name"]).strip().lower() != "untitled team"
+    ]
+
+    if not real_teams:
+        return
+
+    for team in untitled_candidates:
+        is_empty = (
+            not team.editable_profiles
+            and not team.saved_scenarios
+            and not team.coach_adjustments_by_name
+            and not team.data_source
+        )
+
+        if is_empty:
+            manager.delete_team_for_user(team["team_id"], current_user.user_id)
+
+            if st.session_state.get("selected_team_id") == team["team_id"]:
+                st.session_state.selected_team_id = real_teams[0]["team_id"]
+
+
+def render_team_switcher() -> None:
+    """
+    Small top-of-app team switcher and creator.
+    """
+    from core.session_manager import get_session_manager
+
+    manager = get_session_manager()
+    from core.auth import get_current_user
+    current_user = get_current_user()
+    session_obj = manager.get_session(st.session_state.optimizer_session_id)
+    team_summaries = manager.list_team_summaries_for_user(current_user.user_id)
+
+    if not team_summaries:
+        st.warning("No teams found.")
+        return
+
+    team_options = {team["team_name"]: team["team_id"] for team in team_summaries}
+
+    selected_team_id = st.session_state.get("selected_team_id") or session_obj.team_id
+
+    team_names = list(team_options.keys())
+    team_ids_by_name = dict(team_options)
+    team_names_by_id = {team_id: team_name for team_name, team_id in team_options.items()}
+
+    selected_team_name = team_names_by_id.get(selected_team_id, team_names[0])
+
+    # Only force-sync the dropdown when we explicitly changed teams in code
+    # (create/delete/repair), not on every rerun.
+    if st.session_state.get("sync_team_selector_dropdown"):
+        st.session_state.team_selector_dropdown = selected_team_name
+        st.session_state.sync_team_selector_dropdown = False
+
+    with st.container(border=True):
+        st.markdown("### Team")
+        top_col1, top_col2 = st.columns([2.2, 1.8])
+
+        with top_col1:
+            chosen_name = st.selectbox(
+                "Active team",
+                options=team_names,
+                key="team_selector_dropdown",
+            )
+
+            chosen_team_id = team_ids_by_name[chosen_name]
+
+            if chosen_team_id != selected_team_id:
+                manager.flush_session_team(st.session_state.optimizer_session_id)
+                manager.attach_session_to_team(
+                    st.session_state.optimizer_session_id,
+                    team_id=chosen_team_id,
+                )
+                st.session_state.selected_team_id = chosen_team_id
+                st.session_state.sync_team_selector_dropdown = True
+                reset_team_scoped_ui_state()
+                st.rerun()
+
+        with top_col2:
+            if st.session_state.get("clear_new_team_name_input"):
+                st.session_state.new_team_name_input = ""
+                st.session_state.clear_new_team_name_input = False
+            new_team_name = st.text_input(
+                "Create new team",
+                value=st.session_state.get("new_team_name", ""),
+                key="new_team_name_input",
+                placeholder="Example: My Travel Team",
+            )
+
+            if st.button(
+                "Create Team",
+                use_container_width=True,
+                key="create_team_button",
+            ):
+                cleaned = new_team_name.strip()
+                if not cleaned:
+                    st.error("Please enter a team name.")
+                else:
+                    new_team = manager.create_team(
+                        owner_user_id=current_user.user_id,
+                        team_name=cleaned,
+                    )
+                    manager.attach_session_to_team(
+                        st.session_state.optimizer_session_id,
+                        team_id=new_team.team_id,
+                    )
+                    st.session_state.selected_team_id = new_team.team_id
+                    st.session_state.sync_team_selector_dropdown = True
+                    st.session_state.new_team_name = ""
+                    st.session_state.clear_new_team_name_input = True
+                    reset_team_scoped_ui_state()
+                    st.success(f"Created team: {cleaned}")
+                    st.rerun()
+
+        active_team = manager.get_workspace_team_for_session(
+            st.session_state.optimizer_session_id
+        )
+        st.caption(f"Current team: {active_team.team_name}")
+
+        with st.expander("Manage active team", expanded=False):
+            rename_col1, rename_col2 = st.columns([2, 1])
+
+            with rename_col1:
+                rename_value = st.text_input(
+                    "Rename team",
+                    value=active_team.team_name,
+                    key="rename_team_name_input",
+                )
+
+            with rename_col2:
+                st.markdown("<div style='height: 1.8rem;'></div>", unsafe_allow_html=True)
+                if st.button(
+                    "Save Team Name",
+                    use_container_width=True,
+                    key="save_team_name_button",
+                ):
+                    cleaned = rename_value.strip()
+                    if not cleaned:
+                        st.error("Team name cannot be blank.")
+                    else:
+                        manager.rename_team_for_user(
+                            active_team.team_id,
+                            owner_user_id=current_user.user_id,
+                            new_name=cleaned,
+                        )
+                        manager.refresh_workspace_team(st.session_state.optimizer_session_id)
+                        st.session_state.selected_team_id = active_team.team_id
+                        st.session_state.sync_team_selector_dropdown = True
+                        st.success(f"Renamed team to: {cleaned}")
+                        st.rerun()
+
+            st.markdown("---")
+
+            if len(team_summaries) <= 1:
+                st.caption("You need at least one team. Delete is disabled while only one team exists.")
+            else:
+                st.warning("Delete permanently removes this team, its roster, coach nudges, and saved scenarios.")
+
+                if st.button(
+                    "Delete Active Team",
+                    use_container_width=True,
+                    key="delete_active_team_button",
+                ):
+                    delete_active_team_and_recover()
+                    st.success("Team deleted.")
+                    st.rerun()
+
+
 def save_uploaded_file(uploaded_file, target_name: str) -> Path:
     """
     Persist a Streamlit UploadedFile to this session's temp upload directory.
@@ -216,6 +709,32 @@ def reset_multi_gc_ui_state() -> None:
     st.session_state.multi_gc_import_summary = None
 
 
+def find_backend_additional_preview_row(
+    *,
+    incoming_name: str,
+    pa: int,
+    source_file: str,
+) -> dict | None:
+    from core.session_manager import get_session_manager
+
+    # Streamlit is a thin UI shell.
+    # Auth comes from core/auth.py.
+    # Durable team access must stay owner-scoped via SessionManager.
+    manager = get_session_manager()
+    raw_session = manager.get_session(st.session_state.optimizer_session_id)
+    preview_rows = raw_session.manual_roster or []
+
+    for item in preview_rows:
+        if (
+            str(item.get("incoming_name", "")) == str(incoming_name)
+            and int(item.get("pa", 0)) == int(pa)
+            and str(item.get("source_file", "")) == str(source_file)
+        ):
+            return item
+
+    return None
+
+
 def save_uploaded_files(uploaded_files, *, prefix: str) -> list[Path]:
     """
     Persist multiple Streamlit UploadedFile objects to the session upload dir.
@@ -231,6 +750,119 @@ def save_uploaded_files(uploaded_files, *, prefix: str) -> list[Path]:
         saved_paths.append(target_path)
 
     return saved_paths
+
+
+def format_int_compact(value: int) -> str:
+    return f"{int(value):,}"
+
+
+def build_direct_simulation_summary(
+    *,
+    label: str,
+    n_games: int,
+    innings_per_game: int,
+) -> dict:
+    total_innings = int(n_games) * int(innings_per_game)
+    return {
+        "label": label,
+        "games": int(n_games),
+        "innings": int(total_innings),
+        "detail": (
+            f"{label} complete — simulated {format_int_compact(n_games)} games "
+            f"and {format_int_compact(total_innings)} innings."
+        ),
+    }
+
+
+def build_optimizer_simulation_summary(
+    *,
+    label: str,
+    innings_per_game: int,
+    optimizer_meta: dict | None = None,
+    refine_games: int | None = None,
+) -> dict:
+    optimizer_meta = dict(optimizer_meta or {})
+
+    total_games = optimizer_meta.get("total_games")
+    search_total_games = optimizer_meta.get("search_total_games")
+    refine_total_games = optimizer_meta.get("refine_total_games")
+
+    if total_games is not None:
+        total_games = int(total_games)
+        total_innings = total_games * int(innings_per_game)
+
+        detail_parts = [
+            f"{label} complete — simulated {format_int_compact(total_games)} total games "
+            f"and {format_int_compact(total_innings)} total innings."
+        ]
+
+        if search_total_games is not None:
+            search_total_games = int(search_total_games)
+            detail_parts.append(
+                f"Search stage: {format_int_compact(search_total_games)} games "
+                f"({format_int_compact(search_total_games * int(innings_per_game))} innings)."
+            )
+
+        if refine_total_games is not None:
+            refine_total_games = int(refine_total_games)
+            detail_parts.append(
+                f"Final comparison stage: {format_int_compact(refine_total_games)} games "
+                f"({format_int_compact(refine_total_games * int(innings_per_game))} innings)."
+            )
+
+        return {
+            "label": label,
+            "games": total_games,
+            "innings": total_innings,
+            "detail": " ".join(detail_parts),
+        }
+
+    # Fallback if optimizer meta is not available yet.
+    fallback_refine_games = int(refine_games or 3000) * 4
+    fallback_innings = fallback_refine_games * int(innings_per_game)
+
+    return {
+        "label": label,
+        "games": fallback_refine_games,
+        "innings": fallback_innings,
+        "detail": (
+            f"{label} complete — simulated at least {format_int_compact(fallback_refine_games)} games "
+            f"and {format_int_compact(fallback_innings)} innings in the final comparison stage."
+        ),
+    }
+
+
+def clear_run_status_tile() -> None:
+    st.session_state.run_status_tile = None
+
+
+def set_run_status_tile(
+    *,
+    kind: str,
+    title: str,
+    detail: str,
+) -> None:
+    st.session_state.run_status_tile = {
+        "kind": str(kind),
+        "title": str(title),
+        "detail": str(detail),
+    }
+
+
+def render_run_status_tile() -> None:
+    tile = st.session_state.get("run_status_tile")
+    if not tile:
+        return
+
+    with st.container(border=True):
+        st.markdown(f"#### {tile['title']}")
+
+        if tile["kind"] == "success":
+            st.success(tile["detail"])
+        elif tile["kind"] == "error":
+            st.error(tile["detail"])
+        else:
+            st.info(tile["detail"])
 
 
 def duplicate_candidate_key(candidate: DuplicateCandidate) -> str:
@@ -527,6 +1159,215 @@ def render_team_loaded_next_steps(session_state: SessionStateSchema) -> None:
 5. Click **Optimize Current Roster** to compare your version against the model’s recommendation  
             """
         )
+
+
+def render_additional_gc_data_panel(session_state: SessionStateSchema) -> None:
+    if session_state.data_source not in {"gc", "gc_plus_tweaks", "gc_merged"}:
+        return
+
+    st.markdown("")
+    with st.container(border=True):
+        st.markdown("### Add Additional GC Data to Team")
+        st.caption(
+            "Upload one or more new GameChanger CSV files. "
+            "Matched players will merge into the current team. "
+            "New players can be selectively added or skipped."
+        )
+
+        additional_files = st.file_uploader(
+            "Additional GameChanger team stats files",
+            type=["csv"],
+            accept_multiple_files=True,
+            key="additional_gc_csv_upload",
+        )
+
+        preview_col1, preview_col2 = st.columns([1.2, 1])
+
+        with preview_col1:
+            if st.button(
+                "Preview Added Data",
+                use_container_width=True,
+                key="preview_additional_gc_data_btn",
+            ):
+                if not additional_files:
+                    st.error("Please upload at least one GameChanger CSV file.")
+                else:
+                    try:
+                        saved_paths = save_uploaded_files(
+                            additional_files,
+                            prefix="additional_gc",
+                        )
+                        preview = preview_gamechanger_data_addition(
+                            st.session_state.optimizer_session_id,
+                            csv_paths=saved_paths,
+                        )
+                        st.session_state.additional_gc_preview = preview
+                        st.session_state.additional_gc_uploaded_file_names = [f.name for f in additional_files]
+                        st.success("Built additional-data preview.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Could not preview additional GC data: {exc}")
+
+        with preview_col2:
+            if st.button(
+                "Clear Preview",
+                use_container_width=True,
+                key="clear_additional_gc_preview_btn",
+            ):
+                st.session_state.additional_gc_preview = None
+                st.session_state.additional_gc_uploaded_file_names = []
+                st.session_state.additional_gc_apply_summary = None
+                st.rerun()
+
+        preview = st.session_state.get("additional_gc_preview")
+        if preview is None:
+            return
+
+        if preview.summary is not None:
+            summary = preview.summary
+            stat_col1, stat_col2, stat_col3, stat_col4, stat_col5 = st.columns(5)
+            stat_col1.metric("Files", summary.files_processed)
+            stat_col2.metric("Incoming rows", summary.incoming_records)
+            stat_col3.metric("Matched", summary.matched_existing_count)
+            stat_col4.metric("New", summary.new_player_count)
+            stat_col5.metric("Ambiguous", summary.ambiguous_match_count)
+            st.caption(f"Plate appearances available in upload: {summary.plate_appearances_available}")
+
+        matched_rows = [row for row in preview.rows if row.classification == "matched_existing"]
+        new_rows = [row for row in preview.rows if row.classification == "new_player"]
+        ambiguous_rows = [row for row in preview.rows if row.classification == "ambiguous_match"]
+
+        if matched_rows:
+            with st.expander("Matched existing players", expanded=True):
+                st.caption("These are safe merges into current team players.")
+                for idx, row in enumerate(matched_rows, start=1):
+                    st.checkbox(
+                        f"{row.incoming_name} ({row.pa} PA) → merge into {row.matched_player_name}",
+                        value=True,
+                        key=f"additional_gc_merge_existing_{idx}_{row.incoming_name}",
+                    )
+
+        if new_rows:
+            with st.expander("New players found", expanded=True):
+                st.caption("Check only the new players you want to add to this team.")
+                for idx, row in enumerate(new_rows, start=1):
+                    st.checkbox(
+                        f"Add {row.incoming_name} ({row.pa} PA) from {Path(row.source_file).name}",
+                        value=False,
+                        key=f"additional_gc_add_new_{idx}_{row.incoming_name}",
+                    )
+
+        if ambiguous_rows:
+            with st.expander("Possible duplicate / needs review", expanded=True):
+                st.caption("Choose whether to merge into an existing player, add as new, or skip.")
+                for idx, row in enumerate(ambiguous_rows, start=1):
+                    action_key = f"additional_gc_ambiguous_action_{idx}_{row.incoming_name}"
+                    choice = st.selectbox(
+                        f"{row.incoming_name} ({row.pa} PA)",
+                        options=["Skip", "Add as New"] + [f"Merge into {name}" for name in row.candidate_player_names],
+                        index=0,
+                        key=action_key,
+                    )
+                    st.caption(f"Candidates: {', '.join(row.candidate_player_names)}")
+
+        if st.button(
+            "Apply Selected Additional GC Data",
+            use_container_width=True,
+            type="primary",
+            key="apply_additional_gc_data_btn",
+        ):
+            try:
+                reviewed_rows: list[dict[str, Any]] = []
+
+                matched_idx = 0
+                new_idx = 0
+                ambiguous_idx = 0
+
+                for row in preview.rows:
+                    raw_row = {
+                        "incoming_name": row.incoming_name,
+                        "normalized_name": row.normalized_name,
+                        "pa": row.pa,
+                        "source_file": row.source_file,
+                        "classification": row.classification,
+                        "matched_player_id": row.matched_player_id,
+                        "matched_player_name": row.matched_player_name,
+                        "suggested_action": row.suggested_action,
+                        "candidate_player_ids": list(row.candidate_player_ids),
+                        "candidate_player_names": list(row.candidate_player_names),
+                    }
+
+                    # Pull raw preview row from backend-stored manual_roster payload
+                    backend_match = find_backend_additional_preview_row(
+                        incoming_name=row.incoming_name,
+                        pa=row.pa,
+                        source_file=row.source_file,
+                    )
+                    if backend_match is None:
+                        raise ValueError(f"Could not find backend preview row for {row.incoming_name}.")
+                    raw_row["record"] = dict(backend_match.get("record") or {})
+
+                    if row.classification == "matched_existing":
+                        matched_idx += 1
+                        checked = st.session_state.get(
+                            f"additional_gc_merge_existing_{matched_idx}_{row.incoming_name}",
+                            True,
+                        )
+                        raw_row["chosen_action"] = "merge_existing" if checked else "skip"
+
+                    elif row.classification == "new_player":
+                        new_idx += 1
+                        checked = st.session_state.get(
+                            f"additional_gc_add_new_{new_idx}_{row.incoming_name}",
+                            False,
+                        )
+                        raw_row["chosen_action"] = "add_new" if checked else "skip"
+
+                    elif row.classification == "ambiguous_match":
+                        ambiguous_idx += 1
+                        choice = st.session_state.get(
+                            f"additional_gc_ambiguous_action_{ambiguous_idx}_{row.incoming_name}",
+                            "Skip",
+                        )
+
+                        if choice == "Skip":
+                            raw_row["chosen_action"] = "skip"
+                        elif choice == "Add as New":
+                            raw_row["chosen_action"] = "add_new"
+                        elif str(choice).startswith("Merge into "):
+                            selected_name = str(choice).replace("Merge into ", "", 1)
+                            selected_idx = row.candidate_player_names.index(selected_name)
+                            raw_row["chosen_action"] = "merge_existing"
+                            raw_row["matched_player_id"] = row.candidate_player_ids[selected_idx]
+                            raw_row["matched_player_name"] = selected_name
+                        else:
+                            raise ValueError(f"Unsupported ambiguous choice: {choice}")
+
+                    reviewed_rows.append(raw_row)
+
+                _, apply_summary = apply_gamechanger_data_addition(
+                    st.session_state.optimizer_session_id,
+                    reviewed_rows=reviewed_rows,
+                    source_file_names=st.session_state.get("additional_gc_uploaded_file_names", []),
+                )
+
+                st.session_state.additional_gc_apply_summary = apply_summary
+                st.session_state.additional_gc_preview = None
+                st.success("Additional GameChanger data applied to the team.")
+                st.rerun()
+
+            except Exception as exc:
+                st.error(f"Could not apply additional GC data: {exc}")
+
+        apply_summary = st.session_state.get("additional_gc_apply_summary")
+        if apply_summary is not None:
+            st.markdown("#### Last additional-data import")
+            st.caption(
+                f"Merged into {apply_summary.merged_existing_count} existing players, "
+                f"added {apply_summary.added_new_count} new players, "
+                f"skipped {apply_summary.skipped_count}, "
+                f"added {apply_summary.plate_appearances_added} plate appearances."
+            )
 
 
 # =============================================================================
@@ -1298,6 +2139,23 @@ def get_coach_lab_profiles(results: WorkflowResponseSchema | None) -> list[Playe
 
 
 def get_saved_scenarios_for_ui() -> list:
+    """
+    Prefer workspace-backed saved scenarios to avoid unnecessary service/repository
+    round-trips during Streamlit reruns.
+    """
+    try:
+        from core.session_manager import get_session_manager
+
+        manager = get_session_manager()
+        team = manager.get_workspace_team_for_session(
+            st.session_state.optimizer_session_id
+        )
+        scenarios = list(team.saved_scenarios)
+        st.session_state.saved_scenarios_cache = scenarios
+        return scenarios
+    except Exception:
+        pass
+
     try:
         collection = list_saved_scenarios(st.session_state.optimizer_session_id)
         scenarios = list(collection.scenarios)
@@ -1340,8 +2198,12 @@ def get_profile_adjustment_dict(profile) -> dict[str, float]:
 def build_roster_manager_rows(editable_profiles: list) -> list[dict]:
     try:
         from core.session_manager import get_session_manager
-        session_obj = get_session_manager().get_session(st.session_state.optimizer_session_id)
-        benched_names = set(session_obj.benched_player_names)
+
+        manager = get_session_manager()
+        team = manager.get_workspace_team_for_session(
+            st.session_state.optimizer_session_id
+        )
+        benched_names = set(team.benched_player_names)
     except Exception:
         benched_names = set()
 
@@ -1367,8 +2229,12 @@ def build_roster_manager_rows(editable_profiles: list) -> list[dict]:
 def get_benched_player_names_for_ui() -> list[str]:
     try:
         from core.session_manager import get_session_manager
-        session_obj = get_session_manager().get_session(st.session_state.optimizer_session_id)
-        return list(session_obj.benched_player_names)
+
+        manager = get_session_manager()
+        team = manager.get_workspace_team_for_session(
+            st.session_state.optimizer_session_id
+        )
+        return list(team.benched_player_names)
     except Exception:
         return []
 
@@ -1455,6 +2321,56 @@ def profile_source_file_count(profile) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def profile_player_mode(profile) -> str:
+    metadata = get_profile_metadata(profile)
+    explicit = str(metadata.get("player_mode", "")).strip().lower()
+
+    if explicit in {"manual_override", "gc_baseline", "gc_adjusted"}:
+        return explicit
+
+    source_mode = str(getattr(getattr(profile, "source_mode", None), "value", "") or "").strip().lower()
+    source = str(getattr(profile, "source", "") or "").strip().lower()
+
+    if source_mode in {"manual_archetype", "manual_traits", "manual_profile"}:
+        return "manual_override"
+
+    if source in {"manual", "manual_archetype", "manual_traits", "manual_override"}:
+        return "manual_override"
+
+    if source_mode == "gc_nudged":
+        return "gc_adjusted"
+
+    return "gc_baseline"
+
+
+def profile_player_mode_label(profile) -> str:
+    mode = profile_player_mode(profile)
+    if mode == "manual_override":
+        return "Manual"
+    if mode == "gc_adjusted":
+        return "GC+Adj"
+    return "GC"
+
+
+def profile_player_data_source_label(profile) -> str:
+    mode = profile_player_mode(profile)
+
+    if mode == "manual_override":
+        archetype_value = str(getattr(getattr(profile, "archetype", None), "value", getattr(profile, "archetype", "unknown")))
+        return f"Manual override • Archetype baseline: {format_archetype_label(archetype_value)}"
+
+    source_file_count = profile_source_file_count(profile)
+    pa_value = profile_pa(profile)
+
+    bits = ["GameChanger baseline"]
+    if pa_value is not None:
+        bits.append(f"{pa_value} PA")
+    if source_file_count is not None:
+        bits.append(f"{source_file_count} file{'s' if source_file_count != 1 else ''}")
+
+    return " • ".join(bits)
 
 
 def profile_confidence_action(profile) -> str | None:
@@ -1599,6 +2515,11 @@ def render_expandable_player_editor(
     effective_traits = getattr(profile, "effective_traits", base_traits)
     current_adj = get_profile_adjustment_dict(profile)
 
+    nudge_contact = int(round(float(current_adj.get("contact", 0.0))))
+    nudge_power = int(round(float(current_adj.get("power", 0.0))))
+    nudge_speed = int(round(float(current_adj.get("speed", 0.0))))
+    nudge_plate_discipline = int(round(float(current_adj.get("plate_discipline", 0.0))))
+
     slot_label = f"#{slot_number}" if slot_number is not None else "Bench"
     status_label = "Benched" if is_benched else "Active"
 
@@ -1608,7 +2529,9 @@ def render_expandable_player_editor(
     source_file_count = profile_source_file_count(profile)
     confidence_badge = profile_confidence_badge(profile)
 
-    confidence_bits = []
+    mode_label = profile_player_mode_label(profile)
+
+    confidence_bits = [mode_label]
     if pa_value is not None:
         confidence_bits.append(f"PA {pa_value}")
     if source_file_count is not None:
@@ -1631,6 +2554,8 @@ def render_expandable_player_editor(
         confidence_value = profile_confidence(profile)
         confidence_action = profile_confidence_action(profile)
 
+        st.caption(f"Data source: {profile_player_data_source_label(profile)}")
+
         if confidence_value == "Low" and confidence_action:
             st.info(
                 f"{profile_confidence_badge(profile)} {confidence_action} "
@@ -1638,6 +2563,22 @@ def render_expandable_player_editor(
             )
         elif confidence_value == "Medium" and confidence_action:
             st.caption(f"{profile_confidence_badge(profile)} {confidence_action}")
+
+        if profile_player_mode(profile) == "manual_override":
+            st.info(
+                "This player is currently using a Manual Override. "
+                "The trait sliders below are the active baseline for this player."
+            )
+        elif profile_player_mode(profile) == "gc_adjusted":
+            st.info(
+                "This player is using imported GameChanger data plus a saved GC Adjustment (nudge). "
+                "The nudge section above persists across future data rebuilds."
+            )
+        else:
+            st.caption(
+                "This player is currently on the imported GameChanger baseline. "
+                "Use the GC Adjustment section for small persistent nudges, or use the trait sliders below for a Manual Override."
+            )
 
         action_cols = st.columns([0.9, 1, 1, 1])
 
@@ -1775,26 +2716,242 @@ def render_expandable_player_editor(
                 key=f"edit_handedness_{key}",
             )
 
-        st.markdown("##### Traits")
+        st.caption(
+            "Archetype is informational for imported GameChanger players. "
+            "To use an archetype as a true manual baseline, click the button below to load that archetype into the sliders."
+        )
+
+        if st.button(
+            "Load selected archetype baseline into sliders",
+            use_container_width=True,
+            key=f"load_archetype_baseline_{key}",
+        ):
+            try:
+                definition = get_archetype_definition(new_archetype)
+                baseline = definition.default_traits.as_dict()
+
+                st.session_state[f"contact_{key}"] = int(round(baseline["contact"]))
+                st.session_state[f"power_{key}"] = int(round(baseline["power"]))
+                st.session_state[f"speed_{key}"] = int(round(baseline["speed"]))
+                st.session_state[f"baserunning_{key}"] = int(round(baseline["baserunning"]))
+                st.session_state[f"plate_discipline_{key}"] = int(round(baseline["plate_discipline"]))
+                st.session_state[f"strikeout_tendency_{key}"] = int(round(baseline["strikeout_tendency"]))
+                st.session_state[f"walk_skill_{key}"] = int(round(baseline["walk_skill"]))
+                st.session_state[f"chase_tendency_{key}"] = int(round(baseline["chase_tendency"]))
+                st.session_state[f"aggression_{key}"] = int(round(baseline["aggression"]))
+                st.session_state[f"clutch_{key}"] = int(round(baseline["clutch"]))
+                st.session_state[f"sacrifice_ability_{key}"] = int(round(baseline["sacrifice_ability"]))
+
+                st.success(
+                    f"Loaded {format_archetype_label(new_archetype)} baseline into sliders. "
+                    "Click Save Manual Override to persist it."
+                )
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Could not load archetype baseline: {exc}")
+
+        st.markdown("##### GC Adjustment (Nudge)")
+        st.info(
+            "Use GC Adjustment when the imported GameChanger profile is mostly right but needs a small correction. "
+            "These nudges sit on top of the imported baseline and persist across future GC data rebuilds."
+        )
+
+        nudge_col1, nudge_col2, nudge_col3, nudge_col4 = st.columns(4)
+
+        with nudge_col1:
+            nudge_contact_value = st.slider(
+                "Nudge Contact",
+                -25,
+                25,
+                nudge_contact,
+                key=f"nudge_contact_{key}",
+                help=NUDGE_TOOLTIP_BY_FIELD["contact"],
+            )
+
+        with nudge_col2:
+            nudge_power_value = st.slider(
+                "Nudge Power",
+                -25,
+                25,
+                nudge_power,
+                key=f"nudge_power_{key}",
+                help=NUDGE_TOOLTIP_BY_FIELD["power"]
+            )
+
+        with nudge_col3:
+            nudge_speed_value = st.slider(
+                "Nudge Speed",
+                -25,
+                25,
+                nudge_speed,
+                key=f"nudge_speed_{key}",
+                help=NUDGE_TOOLTIP_BY_FIELD["speed"]
+            )
+
+        with nudge_col4:
+            nudge_plate_discipline_value = st.slider(
+                "Nudge Plate Discipline",
+                -25,
+                25,
+                nudge_plate_discipline,
+                key=f"nudge_plate_discipline_{key}",
+                help=NUDGE_TOOLTIP_BY_FIELD["plate_discipline"]
+            )
+
+        nudge_button_cols = st.columns(2)
+
+        with nudge_button_cols[0]:
+            if st.button(
+                "Save GC Adjustment",
+                use_container_width=True,
+                key=f"save_gc_nudge_{key}",
+            ):
+                try:
+                    set_player_adjustment(
+                        st.session_state.optimizer_session_id,
+                        player_name=profile.name,
+                        adjustment={
+                            "contact": float(nudge_contact_value),
+                            "power": float(nudge_power_value),
+                            "speed": float(nudge_speed_value),
+                            "plate_discipline": float(nudge_plate_discipline_value),
+                        },
+                    )
+                    initialize_editable_roster(st.session_state.optimizer_session_id)
+                    st.success(f"Saved GC adjustment for {profile.name}.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Could not save GC adjustment: {exc}")
+
+        with nudge_button_cols[1]:
+            if st.button(
+                "Clear GC Adjustment",
+                use_container_width=True,
+                key=f"clear_gc_nudge_{key}",
+            ):
+                try:
+                    clear_player_adjustment(
+                        st.session_state.optimizer_session_id,
+                        player_name=profile.name,
+                    )
+                    initialize_editable_roster(st.session_state.optimizer_session_id)
+                    st.success(f"Cleared GC adjustment for {profile.name}.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Could not clear GC adjustment: {exc}")
+
+        st.divider()
+
+        st.markdown("##### Manual Override Traits")
+        st.info(
+            "Use Manual Override when you want to replace the imported baseline with your own coach judgment. "
+            "These sliders become the player's active baseline until you revert to GameChanger."
+        )
 
         trait_col1, trait_col2, trait_col3 = st.columns(3)
 
         with trait_col1:
-            contact = st.slider("Contact", 0, 100, int(round(base_traits.contact)), key=f"contact_{key}")
-            baserunning = st.slider("Baserunning", 0, 100, int(round(base_traits.baserunning)), key=f"baserunning_{key}")
-            walk_skill = st.slider("Walk Skill", 0, 100, int(round(base_traits.walk_skill)), key=f"walk_skill_{key}")
-            aggression = st.slider("Aggression", 0, 100, int(round(base_traits.aggression)), key=f"aggression_{key}")
+            contact = st.slider(
+                "Contact",
+                0,
+                100,
+                int(round(base_traits.contact)),
+                key=f"contact_{key}",
+                help=MANUAL_OVERRIDE_TOOLTIP_BY_FIELD["contact"],
+            )
+
+            baserunning = st.slider(
+                "Baserunning",
+                0,
+                100,
+                int(round(base_traits.baserunning)),
+                key=f"baserunning_{key}",
+                help=MANUAL_OVERRIDE_TOOLTIP_BY_FIELD["baserunning"],
+            )
+
+            walk_skill = st.slider(
+                "Walk Skill",
+                0,
+                100,
+                int(round(base_traits.walk_skill)),
+                key=f"walk_{key}",
+                help=MANUAL_OVERRIDE_TOOLTIP_BY_FIELD["walk_skill"],
+            )
+
+            aggression = st.slider(
+                "Aggression",
+                0,
+                100,
+                int(round(base_traits.aggression)),
+                key=f"aggression_{key}",
+                help=MANUAL_OVERRIDE_TOOLTIP_BY_FIELD["aggression"],
+            )
 
         with trait_col2:
-            power = st.slider("Power", 0, 100, int(round(base_traits.power)), key=f"power_{key}")
-            plate_discipline = st.slider("Plate Discipline", 0, 100, int(round(base_traits.plate_discipline)), key=f"plate_discipline_{key}")
-            chase_tendency = st.slider("Chase Tendency", 0, 100, int(round(base_traits.chase_tendency)), key=f"chase_tendency_{key}")
-            clutch = st.slider("Clutch", 0, 100, int(round(base_traits.clutch)), key=f"clutch_{key}")
+            power = st.slider(
+                "Power",
+                0,
+                100,
+                int(round(base_traits.power)),
+                key=f"power_{key}",
+                help=MANUAL_OVERRIDE_TOOLTIP_BY_FIELD["power"],
+            )
+
+            plate_discipline = st.slider(
+                "Plate Discipline",
+                0,
+                100,
+                int(round(base_traits.plate_discipline)),
+                key=f"plate_discipline_{key}",
+                help=MANUAL_OVERRIDE_TOOLTIP_BY_FIELD["plate_discipline"],
+            )
+
+            chase_tendency = st.slider(
+                "Chase Tendency",
+                0,
+                100,
+                int(round(base_traits.chase_tendency)),
+                key=f"chase_{key}",
+                help=MANUAL_OVERRIDE_TOOLTIP_BY_FIELD["chase_tendency"],
+            )
+
+            clutch = st.slider(
+                "Clutch",
+                0,
+                100,
+                int(round(base_traits.clutch)),
+                key=f"clutch_{key}",
+                help=MANUAL_OVERRIDE_TOOLTIP_BY_FIELD["clutch"],
+            )
 
         with trait_col3:
-            speed = st.slider("Speed", 0, 100, int(round(base_traits.speed)), key=f"speed_{key}")
-            strikeout_tendency = st.slider("K Tendency", 0, 100, int(round(base_traits.strikeout_tendency)), key=f"strikeout_tendency_{key}")
-            sacrifice_ability = st.slider("Sacrifice Ability", 0, 100, int(round(base_traits.sacrifice_ability)), key=f"sacrifice_ability_{key}")
+
+            speed = st.slider(
+                "Speed",
+                0,
+                100,
+                int(round(base_traits.speed)),
+                key=f"speed_{key}",
+                help=MANUAL_OVERRIDE_TOOLTIP_BY_FIELD["speed"],
+            )
+
+            strikeout_tendency = st.slider(
+                "Strikeout Tendency",
+                0,
+                100,
+                int(round(base_traits.strikeout_tendency)),
+                key=f"strikeout_{key}",
+                help=MANUAL_OVERRIDE_TOOLTIP_BY_FIELD["strikeout_tendency"],
+            )
+
+            sacrifice_ability = st.slider(
+                "Sacrifice Ability",
+                0,
+                100,
+                int(round(base_traits.sacrifice_ability)),
+                key=f"sacrifice_{key}",
+                help=MANUAL_OVERRIDE_TOOLTIP_BY_FIELD["sacrifice_ability"],
+            )
 
         new_traits = {
             "contact": float(contact),
@@ -1810,10 +2967,10 @@ def render_expandable_player_editor(
             "sacrifice_ability": float(sacrifice_ability),
         }
 
-        save_cols = st.columns(2)
+        save_cols = st.columns(3)
 
         with save_cols[0]:
-            if st.button("Save changes", use_container_width=True, key=f"save_player_editor_{key}"):
+            if st.button("Save Manual Override", use_container_width=True, key=f"save_player_editor_{key}"):
                 try:
                     cleaned_name = new_name.strip()
                     if not cleaned_name:
@@ -1834,22 +2991,44 @@ def render_expandable_player_editor(
                         )
 
                         st.session_state.coach_lab_workspace_mode = "custom"
-                        st.success(f"Saved changes to {cleaned_name}.")
+                        st.success(f"Saved manual override for {cleaned_name}.")
                         st.rerun()
                 except Exception as exc:
                     st.error(f"Could not save player changes: {exc}")
 
         with save_cols[1]:
-            if st.button("Clear saved nudge", use_container_width=True, key=f"clear_player_nudge_from_editor_{key}"):
+            if st.button("Clear saved GC adjustment", use_container_width=True, key=f"clear_player_nudge_from_editor_{key}"):
                 try:
                     clear_player_adjustment(
                         st.session_state.optimizer_session_id,
                         player_name=profile.name,
                     )
-                    st.success(f"Cleared saved nudge for {profile.name}.")
+                    st.success(f"Cleared saved GC adjustment for {profile.name}.")
                     st.rerun()
                 except Exception as exc:
                     st.error(f"Could not clear saved nudge: {exc}")
+
+        st.caption(
+            "Manual Override replaces this player's imported GC baseline for now. "
+            "Clear saved GC adjustment only removes the lighter adjustment layer; it does not reset manual slider edits."
+        )
+
+        with save_cols[2]:
+            if st.button(
+                "Revert to GC Baseline",
+                use_container_width=True,
+                key=f"revert_to_gc_baseline_{key}",
+            ):
+                try:
+                    revert_player_to_imported_gc_baseline(
+                        st.session_state.optimizer_session_id,
+                        player_name=profile.name,
+                        clear_gc_adjustment=True,
+                    )
+                    st.success(f"Reverted {profile.name} to imported GC baseline.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Could not revert player to GC baseline: {exc}")
 
 
 def build_chart_compare_set(
@@ -1876,7 +3055,12 @@ def build_chart_compare_set(
             continue
         if selected_name_set is not None and scenario.name not in selected_name_set:
             continue
-        items.append(scenario.result)
+
+        scenario_item = dict(scenario.result) if isinstance(scenario.result, dict) else scenario.result
+        if isinstance(scenario_item, dict):
+            scenario_item["display_name"] = str(scenario.name)
+
+        items.append(scenario_item)
 
     deduped = []
     seen = set()
@@ -2162,16 +3346,22 @@ def render_saved_scenarios_panel() -> None:
                         st.rerun()
 
             if scenario.result is not None:
-                metrics = scenario.result.metrics
-                target_runs = metrics.target_runs or 4.0
+                metrics = extract_metrics(scenario.result)
+                target_runs = float(metrics.get("target_runs", 4.0) or 4.0)
 
                 metric_cols = st.columns(3)
-                metric_cols[0].metric("Avg runs", f"{metrics.mean_runs:.2f}")
+                metric_cols[0].metric(
+                    "Avg runs",
+                    f"{float(metrics.get('mean_runs', 0.0)):.2f}",
+                )
                 metric_cols[1].metric(
                     f"Chance of {target_runs:.0f}+ runs",
-                    f"{metrics.prob_ge_target:.1%}",
+                    f"{float(metrics.get('prob_ge_target', 0.0)):.1%}",
                 )
-                metric_cols[2].metric("Median runs", f"{metrics.median_runs:.2f}")
+                metric_cols[2].metric(
+                    "Median runs",
+                    f"{float(metrics.get('median_runs', 0.0)):.2f}",
+                )
             else:
                 st.caption("No saved simulation result attached yet.")
 
@@ -2296,6 +3486,9 @@ def render_coach_lab(
         lineup_size=lineup_size,
     ) if editable_profiles else []
 
+    saved_scenarios = get_saved_scenarios_for_ui()
+    next_scenario_number = len(saved_scenarios) + 1
+
     current_lineup_name_set = set(current_lineup_names)
     lineup_profiles = [p for p in active_profiles if p.name in current_lineup_name_set]
     reserve_profiles = [p for p in active_profiles if p.name not in current_lineup_name_set]
@@ -2350,11 +3543,12 @@ def render_coach_lab(
         with lineup_action_col1:
             scenario_name = st.text_input(
                 "Scenario name",
-                value=f"Scenario {len(get_saved_scenarios_for_ui()) + 1}",
+                value=f"Scenario {next_scenario_number}",
                 key="dashboard_scenario_name",
             )
 
         with lineup_action_col2:
+            render_run_status_tile()
             action_cols = st.columns(3)
 
             with action_cols[0]:
@@ -2363,6 +3557,8 @@ def render_coach_lab(
                         use_container_width=True,
                         key="dashboard_optimize_current_roster",
                 ):
+                    clear_run_status_tile()
+
                     try:
                         with st.spinner("Optimizing current roster..."):
                             fresh_results = run_optimization(
@@ -2403,46 +3599,96 @@ def render_coach_lab(
 
                             st.session_state.coach_lab_last_custom_eval = custom_eval
                             st.session_state.coach_lab_workspace_mode = "optimized"
+                            st.session_state.coach_lab_include_live_custom = True
+
+                            optimizer_meta = {}
+                            try:
+                                optimizer_meta = dict(
+                                    getattr(getattr(fresh_results, "coach_summary", None), "optimizer_meta", {}) or {}
+                                )
+                            except Exception:
+                                optimizer_meta = {}
+
+                            summary = build_optimizer_simulation_summary(
+                                label="Roster optimization",
+                                innings_per_game=int(run_settings["rules_config"]["innings"]),
+                                optimizer_meta=optimizer_meta,
+                                refine_games=int(run_settings["optimizer_config"]["refine_games"]),
+                            )
+
+                            set_run_status_tile(
+                                kind="success",
+                                title="Roster optimization",
+                                detail=summary["detail"],
+                            )
 
                             clear_lineup_order_widget_state()
 
-                        st.success("Optimized lineup loaded into dashboard.")
                         st.rerun()
+
                     except Exception as exc:
-                        st.error(f"Could not optimize current roster: {exc}")
+                        set_run_status_tile(
+                            kind="error",
+                            title="Roster optimization",
+                            detail=f"Could not optimize current roster: {exc}",
+                        )
+                        st.rerun()
 
             with action_cols[1]:
                 if st.button(
                         "Simulate My Lineup",
                         use_container_width=True,
-                        type="primary",
-                        key="dashboard_simulate_lineup",
+                        key="dashboard_simulate_my_lineup",
                 ):
+                    clear_run_status_tile()
+
                     try:
-                        latest_lineup_names = get_current_active_lineup_names(
-                            get_editable_roster_for_ui(),
-                            continuous_batting=continuous_batting,
-                            lineup_size=lineup_size,
-                        )
+                        with st.spinner("Simulating current custom batting order..."):
+                            current_workspace_names = get_current_active_lineup_names(
+                                get_editable_roster_for_ui(),
+                                continuous_batting=continuous_batting,
+                                lineup_size=lineup_size,
+                            )
 
-                        set_custom_lineup(
-                            st.session_state.optimizer_session_id,
-                            lineup_names=latest_lineup_names,
-                        )
+                            set_custom_lineup(
+                                st.session_state.optimizer_session_id,
+                                lineup_names=current_workspace_names,
+                            )
 
-                        custom_eval = evaluate_custom_lineup(
-                            st.session_state.optimizer_session_id,
-                            target_runs=run_settings["target_runs"],
-                            n_games=run_settings["optimizer_config"]["refine_games"],
-                            seed=run_settings["optimizer_config"]["seed"],
-                            display_name="Coach Custom Order",
-                            rules=RulesConfig(**run_settings["rules_config"]),
-                        )
-                        st.session_state.coach_lab_last_custom_eval = custom_eval
-                        st.session_state.coach_lab_workspace_mode = "custom"
-                        st.success("Current custom batting order simulated.")
+                            custom_eval = evaluate_custom_lineup(
+                                st.session_state.optimizer_session_id,
+                                target_runs=run_settings["target_runs"],
+                                n_games=run_settings["optimizer_config"]["refine_games"],
+                                seed=run_settings["optimizer_config"]["seed"],
+                                display_name="Coach Custom",
+                                rules=RulesConfig(**run_settings["rules_config"]),
+                            )
+
+                            st.session_state.coach_lab_last_custom_eval = custom_eval
+                            st.session_state.coach_lab_workspace_mode = "custom"
+                            st.session_state.coach_lab_include_live_custom = True
+
+                            summary = build_direct_simulation_summary(
+                                label="Custom lineup simulation",
+                                n_games=int(run_settings["optimizer_config"]["refine_games"]),
+                                innings_per_game=int(run_settings["rules_config"]["innings"]),
+                            )
+
+                            set_run_status_tile(
+                                kind="success",
+                                title="Custom lineup simulation",
+                                detail=summary["detail"],
+                            )
+
+                        st.rerun()
+
                     except Exception as exc:
-                        st.error(f"Could not simulate custom order: {exc}")
+                        set_run_status_tile(
+                            kind="error",
+                            title="Custom lineup simulation",
+                            detail=f"Could not simulate current lineup: {exc}",
+                        )
+                        st.rerun()
 
             with action_cols[2]:
                 if st.button(
@@ -2462,28 +3708,66 @@ def render_coach_lab(
                             lineup_names=latest_lineup_names,
                         )
 
-                        saved_name = scenario_name.strip() or f"Scenario {len(get_saved_scenarios_for_ui()) + 1}"
+                        saved_name = scenario_name.strip() or f"Scenario {next_scenario_number}"
 
-                        custom_eval = evaluate_custom_lineup(
-                            st.session_state.optimizer_session_id,
-                            target_runs=run_settings["target_runs"],
-                            n_games=run_settings["optimizer_config"]["refine_games"],
-                            seed=run_settings["optimizer_config"]["seed"],
-                            display_name=saved_name,
-                            rules=RulesConfig(**run_settings["rules_config"]),
-                        )
-                        st.session_state.coach_lab_last_custom_eval = custom_eval
+                        simulation_games = int(run_settings["optimizer_config"]["refine_games"])
+
+                        cached_eval = st.session_state.get("coach_lab_last_custom_eval")
+                        cached_lineup = None
+                        if cached_eval and isinstance(cached_eval, dict):
+                            cached_custom = cached_eval.get("custom_lineup") or {}
+                            cached_lineup = list(cached_custom.get("lineup", []))
+
+                        if cached_lineup == latest_lineup_names and cached_eval is not None:
+                            custom_eval = cached_eval
+
+                            # set_custom_lineup(...) above cleared the backend's
+                            # custom_lineup_result, so restore it from the cached UI
+                            # payload before saving.
+                            set_custom_lineup_result_payload(
+                                st.session_state.optimizer_session_id,
+                                result_payload=custom_eval,
+                            )
+                        else:
+                            custom_eval = evaluate_custom_lineup(
+                                st.session_state.optimizer_session_id,
+                                target_runs=run_settings["target_runs"],
+                                n_games=simulation_games,
+                                seed=run_settings["optimizer_config"]["seed"],
+                                display_name=saved_name,
+                                rules=RulesConfig(**run_settings["rules_config"]),
+                            )
+
+                        if custom_eval is not None:
+                            st.session_state.coach_lab_last_custom_eval = custom_eval
 
                         save_current_scenario(
                             st.session_state.optimizer_session_id,
                             name=saved_name,
                         )
 
+                        # The current live eval is no longer "unsaved" once it has
+                        # been saved as a scenario. Rename it to match, then hide
+                        # the live trace by default so charts only show the saved item.
+                        live_eval = st.session_state.get("coach_lab_last_custom_eval")
+                        if isinstance(live_eval, dict):
+                            custom_block = live_eval.get("custom_lineup")
+                            if isinstance(custom_block, dict):
+                                custom_block["display_name"] = str(saved_name)
+                                st.session_state.coach_lab_last_custom_eval = live_eval
+
+                        st.session_state.coach_lab_include_live_custom = False
+
                         existing = st.session_state.get("coach_lab_saved_scenario_messages", [])
                         existing.append(f"Saved scenario: {saved_name}")
                         st.session_state.coach_lab_saved_scenario_messages = existing[-12:]
 
-                        st.success(f"Saved scenario: {saved_name}. It now appears in the comparison charts below.")
+                        set_run_status_tile(
+                            kind="success",
+                            title="Scenario saved",
+                            detail=f"Saved scenario: {saved_name}. It now appears in the comparison charts below.",
+                        )
+
                         st.rerun()
                     except Exception as exc:
                         st.error(f"Could not save scenario: {exc}")
@@ -3429,11 +4713,18 @@ def main() -> None:
     )
 
     inject_custom_styles()
+
     ensure_ui_state()
+    require_authenticated_user()
     backend_session = get_backend_session()
+    ensure_selected_team()
+
+    render_signed_in_banner()
 
     st.title(APP_TITLE)
     st.caption(APP_SUBTITLE)
+
+    render_team_switcher()
 
     run_settings = render_sidebar(backend_session)
     st.session_state.run_settings_cache = run_settings
@@ -3442,6 +4733,7 @@ def main() -> None:
     render_model_limitations_panel()
 
     render_team_entry_panel(backend_session)
+    render_additional_gc_data_panel(backend_session)
     st.markdown("")
 
     existing_results = safe_get_results()

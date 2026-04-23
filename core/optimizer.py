@@ -249,10 +249,25 @@ def local_beam_search(
     top_sortino = sorted(refined, key=lambda x: x["sortino"], reverse=True)
     top_prob = sorted(refined, key=lambda x: x["prob_ge_target"], reverse=True)
 
+    search_evaluations = len(cache)
+    refine_evaluations = len(refined)
+
     return {
         "top_mean": top_mean[:top_n],
         "top_sortino": top_sortino[:top_n],
         "top_prob": top_prob[:top_n],
+        "_meta": {
+            "mode": "fast",
+            "player_count": len(players),
+            "seed_count": len(seeds),
+            "search_evaluations": int(search_evaluations),
+            "search_games_per_evaluation": int(search_games),
+            "search_total_games": int(search_evaluations * search_games),
+            "refine_evaluations": int(refine_evaluations),
+            "refine_games_per_evaluation": int(refine_games),
+            "refine_total_games": int(refine_evaluations * refine_games),
+            "total_games": int((search_evaluations * search_games) + (refine_evaluations * refine_games)),
+        },
     }
 
 
@@ -305,10 +320,28 @@ def brute_force_search(
             )
         return refined
 
+    refined_top_mean = refine(top_mean)
+    refined_top_sortino = refine(top_sortino)
+    refined_top_prob = refine(top_prob)
+
+    search_evaluations = len(results)
+    refine_evaluations = len(top_mean) + len(top_sortino) + len(top_prob)
+
     return {
-        "top_mean": refine(top_mean),
-        "top_sortino": refine(top_sortino),
-        "top_prob": refine(top_prob),
+        "top_mean": refined_top_mean,
+        "top_sortino": refined_top_sortino,
+        "top_prob": refined_top_prob,
+        "_meta": {
+            "mode": "brute_force",
+            "player_count": len(players),
+            "search_evaluations": int(search_evaluations),
+            "search_games_per_evaluation": int(search_games),
+            "search_total_games": int(search_evaluations * search_games),
+            "refine_evaluations": int(refine_evaluations),
+            "refine_games_per_evaluation": int(refine_games),
+            "refine_total_games": int(refine_evaluations * refine_games),
+            "total_games": int((search_evaluations * search_games) + (refine_evaluations * refine_games)),
+        },
     }
 
 

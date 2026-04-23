@@ -4,5 +4,10 @@ __pycache__/
 *.pyc
 .DS_Store
 output/
+
+.streamlit/secrets.toml
+
 data/uploads/
+data/teams/
+data/scenarios/
 data/processed/

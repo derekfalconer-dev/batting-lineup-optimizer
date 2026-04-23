@@ -10,6 +10,11 @@ from core.roster_reconciliation import (
     confidence_level_from_pa,
 )
 
+from core.player_aggregation import (
+    AggregatePlayerRecord,
+    aggregate_player_to_gc_record,
+)
+
 from core.archetypes import (
     Handedness,
     PlayerArchetype,
@@ -89,8 +94,12 @@ def profile_from_gc_record(
         {
             "source_file": record.get("source_file"),
             "source_files": record.get("source_files", []),
-            "source_file_count": record.get("source_file_count") if record.get("source_file_count") not in (
-            None, "") else 1,
+            "source_file_count": (
+                int(record.get("source_file_count"))
+                if record.get("source_file_count") not in (None, "", "-")
+                else len([x for x in record.get("source_files", []) if str(x).strip()])
+                or (1 if str(record.get("source_file", "")).strip() else 0)
+            ),
             "merged_record_count": record.get("merged_record_count"),
             "merged_from_names": record.get("merged_from_names", []),
             "number": record.get("number"),
@@ -252,6 +261,36 @@ def build_team_from_gc_records(
         )
         for record in records
     ]
+    profiles = apply_adjustments_to_profiles(profiles, adjustments_by_name)
+    return bundle_team(profiles, source=source)
+
+
+def build_team_from_aggregate_players(
+    aggregate_players: Sequence[AggregatePlayerRecord],
+    *,
+    default_handedness: Handedness = Handedness.UNKNOWN,
+    adjustments_by_name: Mapping[str, Mapping[str, float]] | None = None,
+    source: str = "gamechanger_aggregate_records",
+) -> TeamBundle:
+    records = [
+        aggregate_player_to_gc_record(player)
+        for player in aggregate_players
+        if player.active
+    ]
+
+    profiles = [
+        profile_from_gc_record(
+            record,
+            handedness=default_handedness,
+            metadata={
+                "player_id": player.player_id,
+                "alias_count": len(player.merged_from_names),
+                "import_event_count": len(player.import_events),
+            },
+        )
+        for record, player in zip(records, [p for p in aggregate_players if p.active])
+    ]
+
     profiles = apply_adjustments_to_profiles(profiles, adjustments_by_name)
     return bundle_team(profiles, source=source)
 
