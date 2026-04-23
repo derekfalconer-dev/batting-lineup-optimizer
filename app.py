@@ -1225,7 +1225,7 @@ def render_how_to_use_panel() -> None:
         st.markdown("### How coaches are using this")
         st.caption("The most common decisions this tool helps with right now.")
 
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
 
         with col1:
             st.markdown("**1. Player absent tonight**")
@@ -1243,6 +1243,12 @@ def render_how_to_use_panel() -> None:
             st.markdown("**3. Compare your intuition**")
             st.caption(
                 "Set up the order you like, simulate it, then compare it against the optimized order."
+            )
+
+        with col4:
+            st.markdown("4. Adjust for a hot or cold bat")
+            st.caption(
+                "Use the nudge sliders to reflect a player who’s hot or in a slump, then re-run the optimizer to see if it actually changes where they should hit."
             )
 
 
@@ -1310,8 +1316,7 @@ def render_additional_gc_data_panel(session_state: SessionStateSchema) -> None:
         return
 
     st.markdown("")
-    with st.container(border=True):
-        st.markdown("### Add Additional GC Data to Team")
+    with st.expander("Add additional GameChanger data to this team", expanded=False):
         st.caption(
             "Upload one or more new GameChanger CSV files. "
             "Matched players will merge into the current team. "
@@ -1904,7 +1909,8 @@ def render_team_entry_panel(session_state: SessionStateSchema) -> None:
                     st.rerun()
 
     expander_open = bool(st.session_state.get("show_team_loader", False))
-    expander_label = header if not expander_open else f"{header}\u200b{team_entry_expander_token()}"
+    token = team_entry_expander_token()
+    expander_label = header if token % 2 == 0 else f"{header} "
 
     if has_existing_teams:
         with st.expander(expander_label, expanded=expander_open):
