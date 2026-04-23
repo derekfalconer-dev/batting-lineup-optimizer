@@ -607,6 +607,56 @@ def run_optimization(
     manager.set_custom_lineup(session_id, lineup_names=optimized_names)
     manager.flush_workspace_team(session_id)
 
+    try:
+        from core.analytics import safe_log_event
+
+        user_id = None
+        user_email = None
+        try:
+            from core.auth import get_current_user
+            current_user = get_current_user()
+            user_id = current_user.user_id
+            user_email = current_user.email
+        except Exception:
+            pass
+
+        optimizer_meta = {}
+        try:
+            optimizer_meta = dict(
+                getattr(getattr(result, "coach_summary", None), "optimizer_meta", {}) or {}
+            )
+        except Exception:
+            optimizer_meta = {}
+
+        optimized_mean_runs = None
+        original_mean_runs = None
+        mean_run_delta = None
+
+        try:
+            optimized_mean_runs = float(result.optimized.metrics.mean_runs)
+            original_mean_runs = float(result.original.metrics.mean_runs)
+            mean_run_delta = optimized_mean_runs - original_mean_runs
+        except Exception:
+            pass
+
+        safe_log_event(
+            event_type="optimize_run",
+            user_id=user_id,
+            user_email=user_email,
+            session_id=session.session_id,
+            team_id=session.team_id,
+            metadata={
+                "data_source": session.data_source,
+                "target_runs": target_runs,
+                "optimized_mean_runs": optimized_mean_runs,
+                "original_mean_runs": original_mean_runs,
+                "mean_run_delta": mean_run_delta,
+                "optimizer_meta": optimizer_meta,
+            },
+        )
+    except Exception:
+        pass
+
     return result
 
 
@@ -1104,6 +1154,37 @@ def evaluate_custom_lineup(
     session.custom_lineup_result = result
     session.touch()
 
+    try:
+        from core.analytics import safe_log_event
+
+        user_id = None
+        user_email = None
+        try:
+            from core.auth import get_current_user
+            current_user = get_current_user()
+            user_id = current_user.user_id
+            user_email = current_user.email
+        except Exception:
+            pass
+
+        safe_log_event(
+            event_type="simulate_run",
+            user_id=user_id,
+            user_email=user_email,
+            session_id=session.session_id,
+            team_id=session.team_id,
+            metadata={
+                "data_source": session.data_source,
+                "display_name": display_name,
+                "target_runs": target_runs,
+                "n_games": n_games,
+                "lineup_size": len(session.custom_lineup_names),
+                "lineup_names": list(session.custom_lineup_names),
+            },
+        )
+    except Exception:
+        pass
+
     return result
 
 
@@ -1153,6 +1234,39 @@ def save_current_scenario(
         adjustments_by_name=team.coach_adjustments_by_name,
         result=serializable_result,
     )
+
+    try:
+        from core.analytics import safe_log_event
+
+        user_id = None
+        user_email = None
+        try:
+            from core.auth import get_current_user
+            current_user = get_current_user()
+            user_id = current_user.user_id
+            user_email = current_user.email
+        except Exception:
+            pass
+
+        safe_log_event(
+            event_type="scenario_saved",
+            user_id=user_id,
+            user_email=user_email,
+            session_id=session.session_id,
+            team_id=session.team_id,
+            metadata={
+                "scenario_name": name,
+                "scenario_id": scenario.scenario_id,
+                "lineup_size": len(session.custom_lineup_names),
+                "has_result": serializable_result is not None,
+            },
+        )
+    except Exception:
+        pass
+
+    manager.flush_workspace_team(session_id)
+    return present_saved_scenario(scenario)
+
     manager.flush_workspace_team(session_id)
     return present_saved_scenario(scenario)
 

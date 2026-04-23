@@ -206,6 +206,22 @@ def ensure_ui_state() -> None:
     if "sync_team_selector_dropdown" not in st.session_state:
         st.session_state.sync_team_selector_dropdown = False
 
+    if "analytics_login_logged" not in st.session_state:
+        st.session_state.analytics_login_logged = False
+
+    if "team_entry_expander_token" not in st.session_state:
+        st.session_state.team_entry_expander_token = 0
+
+
+def team_entry_expander_token() -> int:
+    return int(st.session_state.get("team_entry_expander_token", 0))
+
+
+def bump_team_entry_expander_token() -> None:
+    st.session_state["team_entry_expander_token"] = (
+        int(st.session_state.get("team_entry_expander_token", 0)) + 1
+    )
+
 
 def extract_metrics(result) -> dict:
     """
@@ -356,6 +372,21 @@ def render_signed_in_banner() -> None:
     except Exception:
         return
 
+    if not st.session_state.get("analytics_login_logged"):
+        from core.analytics import safe_log_event
+
+        safe_log_event(
+            event_type="login",
+            user_id=current_user.user_id,
+            user_email=current_user.email,
+            session_id=st.session_state.get("optimizer_session_id"),
+            team_id=st.session_state.get("selected_team_id"),
+            metadata={
+                "display_name": current_user.display_name,
+            },
+        )
+        st.session_state.analytics_login_logged = True
+
     with st.container(border=True):
         left_col, right_col = st.columns([4, 1])
 
@@ -401,6 +432,7 @@ def render_signed_in_banner() -> None:
                     "additional_gc_uploaded_file_names",
                     "additional_gc_apply_summary",
                     "run_status_tile",
+                    "analytics_login_logged",
                 ]:
                     st.session_state.pop(key, None)
 
@@ -428,6 +460,33 @@ def ensure_selected_team() -> None:
             team_name="Untitled Team",
         )
         manager.attach_session_to_team(session_obj.session_id, team_id=team.team_id)
+
+        from core.analytics import safe_log_event
+
+        safe_log_event(
+            event_type="team_created",
+            user_id=current_user.user_id,
+            user_email=current_user.email,
+            session_id=session_obj.session_id,
+            team_id=team.team_id,
+            metadata={
+                "team_name": "Untitled Team",
+                "creation_mode": "bootstrap_default",
+            },
+        )
+
+        safe_log_event(
+            event_type="team_loaded",
+            user_id=current_user.user_id,
+            user_email=current_user.email,
+            session_id=session_obj.session_id,
+            team_id=team.team_id,
+            metadata={
+                "team_name": "Untitled Team",
+                "load_reason": "bootstrap_default",
+            },
+        )
+
         st.session_state.selected_team_id = team.team_id
         st.session_state.sync_team_selector_dropdown = True
         return
@@ -438,6 +497,18 @@ def ensure_selected_team() -> None:
     if selected_team_id and selected_team_id in valid_team_ids:
         if session_obj.team_id != selected_team_id:
             manager.attach_session_to_team(session_obj.session_id, team_id=selected_team_id)
+
+            from core.analytics import safe_log_event
+            safe_log_event(
+                event_type="team_loaded",
+                user_id=current_user.user_id,
+                user_email=current_user.email,
+                session_id=session_obj.session_id,
+                team_id=selected_team_id,
+                metadata={
+                    "load_reason": "session_state_selection",
+                },
+            )
         return
 
     if session_obj.team_id and session_obj.team_id in valid_team_ids:
@@ -447,6 +518,20 @@ def ensure_selected_team() -> None:
 
     first_team = team_summaries[0]
     manager.attach_session_to_team(session_obj.session_id, team_id=first_team["team_id"])
+
+    from core.analytics import safe_log_event
+
+    safe_log_event(
+        event_type="team_loaded",
+        user_id=current_user.user_id,
+        user_email=current_user.email,
+        session_id=session_obj.session_id,
+        team_id=first_team["team_id"],
+        metadata={
+            "load_reason": "fallback_first_team",
+        },
+    )
+
     st.session_state.selected_team_id = first_team["team_id"]
     st.session_state.sync_team_selector_dropdown = True
 
@@ -587,6 +672,21 @@ def render_team_switcher() -> None:
                     st.session_state.optimizer_session_id,
                     team_id=chosen_team_id,
                 )
+
+                from core.analytics import safe_log_event
+
+                safe_log_event(
+                    event_type="team_loaded",
+                    user_id=current_user.user_id,
+                    user_email=current_user.email,
+                    session_id=st.session_state.optimizer_session_id,
+                    team_id=chosen_team_id,
+                    metadata={
+                        "team_name": chosen_name,
+                        "load_reason": "team_switcher",
+                    },
+                )
+
                 st.session_state.selected_team_id = chosen_team_id
                 st.session_state.sync_team_selector_dropdown = True
                 reset_team_scoped_ui_state()
@@ -604,9 +704,9 @@ def render_team_switcher() -> None:
             )
 
             if st.button(
-                "Create Team",
-                use_container_width=True,
-                key="create_team_button",
+                    "Create Team",
+                    use_container_width=True,
+                    key="create_team_button",
             ):
                 cleaned = new_team_name.strip()
                 if not cleaned:
@@ -620,11 +720,33 @@ def render_team_switcher() -> None:
                         st.session_state.optimizer_session_id,
                         team_id=new_team.team_id,
                     )
+
+                    from core.analytics import safe_log_event
+
+                    # ✅ keep existing logging
+                    safe_log_event(
+                        event_type="team_created",
+                        user_id=current_user.user_id,
+                        user_email=current_user.email,
+                        session_id=st.session_state.optimizer_session_id,
+                        team_id=new_team.team_id,
+                        metadata={
+                            "team_name": cleaned,
+                            "creation_mode": "manual_create",
+                        },
+                    )
+
+                    st.session_state.show_team_loader = True
+                    bump_team_entry_expander_token()
+
                     st.session_state.selected_team_id = new_team.team_id
+
                     st.session_state.sync_team_selector_dropdown = True
                     st.session_state.new_team_name = ""
                     st.session_state.clear_new_team_name_input = True
+
                     reset_team_scoped_ui_state()
+
                     st.success(f"Created team: {cleaned}")
                     st.rerun()
 
@@ -1064,6 +1186,28 @@ def finalize_multi_gc_import(
 
     initialize_editable_roster(st.session_state.optimizer_session_id)
 
+    from core.analytics import safe_log_event
+    from core.auth import get_current_user
+    from core.session_manager import get_session_manager
+
+    current_user = get_current_user()
+    manager = get_session_manager()
+    session_obj = manager.get_session(st.session_state.optimizer_session_id)
+
+    safe_log_event(
+        event_type="gc_import_multi",
+        user_id=current_user.user_id,
+        user_email=current_user.email,
+        session_id=session_obj.session_id,
+        team_id=session_obj.team_id,
+        metadata={
+            "file_count": len(file_names),
+            "file_names": list(file_names),
+            "final_player_count": len(final_records),
+            "data_source": "gc_merged",
+        },
+    )
+
     st.session_state.multi_gc_import_summary = {
         "file_names": list(file_names),
         "final_player_count": len(final_records),
@@ -1353,6 +1497,30 @@ def render_additional_gc_data_panel(session_state: SessionStateSchema) -> None:
 
                 st.session_state.additional_gc_apply_summary = apply_summary
                 st.session_state.additional_gc_preview = None
+
+                from core.analytics import safe_log_event
+                from core.auth import get_current_user
+                from core.session_manager import get_session_manager
+
+                current_user = get_current_user()
+                manager = get_session_manager()
+                session_obj = manager.get_session(st.session_state.optimizer_session_id)
+
+                safe_log_event(
+                    event_type="gc_additional_data_applied",
+                    user_id=current_user.user_id,
+                    user_email=current_user.email,
+                    session_id=session_obj.session_id,
+                    team_id=session_obj.team_id,
+                    metadata={
+                        "source_file_names": list(st.session_state.get("additional_gc_uploaded_file_names", [])),
+                        "merged_existing_count": apply_summary.merged_existing_count,
+                        "added_new_count": apply_summary.added_new_count,
+                        "skipped_count": apply_summary.skipped_count,
+                        "plate_appearances_added": apply_summary.plate_appearances_added,
+                    },
+                )
+
                 st.success("Additional GameChanger data applied to the team.")
                 st.rerun()
 
@@ -1695,11 +1863,19 @@ def inject_custom_styles() -> None:
 
 
 def render_team_entry_panel(session_state: SessionStateSchema) -> None:
-    st.markdown("## Build your team and lineup")
-    st.caption(
-        "Start with a GameChanger import or begin with an empty roster and build the team in Coach Lab."
-    )
+    from core.session_manager import get_session_manager
+    from core.auth import get_current_user
 
+    manager = get_session_manager()
+    current_user = get_current_user()
+
+    team_summaries = manager.list_team_summaries_for_user(current_user.user_id)
+    has_existing_teams = len(team_summaries) > 0
+
+    header = "Build team, change source, or import additional data"
+    subheader = "Upload more GameChanger files or create a new team"
+
+    # Keep the "current team source" summary visible when a team is already loaded.
     if session_state.data_source and not st.session_state.get("show_team_loader", True):
         loaded_col1, loaded_col2 = st.columns([3, 1])
 
@@ -1724,11 +1900,25 @@ def render_team_entry_panel(session_state: SessionStateSchema) -> None:
                     key="show_team_loader_button",
                 ):
                     st.session_state.show_team_loader = True
+                    bump_team_entry_expander_token()
                     st.rerun()
-        return
 
+    expander_open = bool(st.session_state.get("show_team_loader", False))
+    expander_label = header if not expander_open else f"{header}\u200b{team_entry_expander_token()}"
+
+    if has_existing_teams:
+        with st.expander(expander_label, expanded=expander_open):
+            st.caption(subheader)
+            _render_team_entry_body(session_state)
+    else:
+        st.markdown(f"## {header}")
+        st.caption(subheader)
+        _render_team_entry_body(session_state)
+
+
+def _render_team_entry_body(session_state: SessionStateSchema) -> None:
     with st.container(border=True):
-        st.markdown("### Start here")
+        st.markdown("### Import or build your roster")
 
         entry_tab_single, entry_tab_multi, entry_tab_empty = st.tabs(
             ["Single GC Import", "Multi-GC Import", "Start Empty Team"]
@@ -1762,13 +1952,33 @@ def render_team_entry_panel(session_state: SessionStateSchema) -> None:
                         csv_path = save_uploaded_file(gc_file, "gamechanger.csv")
 
                         updated = configure_gc_session(
-                            st.session_state.optimizer_session_id,
+                            session_state.session_id,
                             csv_path=csv_path,
                             adjustments_path=None,
                             data_source="gc",
                         )
 
-                        initialize_editable_roster(st.session_state.optimizer_session_id)
+                        from core.analytics import safe_log_event
+                        from core.auth import get_current_user
+                        from core.session_manager import get_session_manager
+
+                        current_user = get_current_user()
+                        manager = get_session_manager()
+                        session_obj = manager.get_session(session_state.session_id)
+
+                        safe_log_event(
+                            event_type="gc_import_single",
+                            user_id=current_user.user_id,
+                            user_email=current_user.email,
+                            session_id=session_obj.session_id,
+                            team_id=session_obj.team_id,
+                            metadata={
+                                "file_name": gc_file.name,
+                                "data_source": "gc",
+                            },
+                        )
+
+                        initialize_editable_roster(session_state.session_id)
 
                         st.session_state.show_team_loader = False
                         st.session_state.active_results_tab = "Coach Lab"
@@ -1953,7 +2163,6 @@ def render_team_entry_panel(session_state: SessionStateSchema) -> None:
                         "If you still know two rows are the same player, use the manual merge tool below."
                     )
 
-
                 with st.container(border=True):
                     st.markdown("##### Manual merge players")
                     st.caption(
@@ -2058,11 +2267,11 @@ def render_team_entry_panel(session_state: SessionStateSchema) -> None:
                     reset_multi_gc_ui_state()
 
                     configure_empty_manual_session(
-                        st.session_state.optimizer_session_id,
+                        session_state.session_id,
                         data_source="manual_archetypes",
                     )
 
-                    initialize_editable_roster(st.session_state.optimizer_session_id)
+                    initialize_editable_roster(session_state.session_id)
 
                     st.session_state.show_team_loader = False
                     st.session_state.active_results_tab = "Coach Lab"
@@ -2077,7 +2286,7 @@ def render_team_entry_panel(session_state: SessionStateSchema) -> None:
 
         st.markdown("")
         if st.button("Clear Current Results", use_container_width=True, key="clear_results_from_entry_panel"):
-            reset_session_results(st.session_state.optimizer_session_id)
+            reset_session_results(session_state.session_id)
             st.info("Previous results cleared.")
 
 
@@ -2122,6 +2331,18 @@ def render_run_section(run_settings: dict) -> None:
                     refreshed_results = safe_get_results()
                     st.session_state.last_completed_results = refreshed_results
                     st.session_state.active_results_tab = "Coach View"
+
+                    from core.analytics import safe_log_event
+                    from core.auth import get_current_user
+                    from core.session_manager import get_session_manager
+
+                    current_user = get_current_user()
+                    manager = get_session_manager()
+                    session_obj = manager.get_session(st.session_state.optimizer_session_id)
+
+                    optimizer_meta = {}
+                    if refreshed_results and getattr(refreshed_results, "coach_summary", None):
+                        optimizer_meta = dict(getattr(refreshed_results.coach_summary, "optimizer_meta", {}) or {})
 
                     st.success("Analysis complete.")
                     st.rerun()
@@ -2278,6 +2499,16 @@ def player_editor_key(name: str) -> str:
         .replace("\\", "_")
         .replace(".", "_")
     )
+
+
+def player_editor_reset_token(player_name: str) -> int:
+    state_key = f"player_editor_reset_token__{player_editor_key(player_name)}"
+    return int(st.session_state.get(state_key, 0))
+
+
+def bump_player_editor_reset_token(player_name: str) -> None:
+    state_key = f"player_editor_reset_token__{player_editor_key(player_name)}"
+    st.session_state[state_key] = int(st.session_state.get(state_key, 0)) + 1
 
 
 def get_profile_metadata(profile) -> dict:
@@ -2453,6 +2684,42 @@ def clear_lineup_order_widget_state() -> None:
         del st.session_state[key]
 
 
+def clear_player_editor_widget_state(player_name: str) -> None:
+    """
+    Clear cached Streamlit widget state for one player's editor so sliders
+    rebuild from the latest backend profile values on the next rerun.
+    """
+    key = player_editor_key(player_name)
+
+    prefixes = [
+        "edit_name",
+        "edit_archetype",
+        "edit_handedness",
+        "nudge_contact",
+        "nudge_power",
+        "nudge_speed",
+        "nudge_plate_discipline",
+        "contact",
+        "power",
+        "speed",
+        "baserunning",
+        "plate_discipline",
+        "strikeout",
+        "strikeout_tendency",
+        "walk",
+        "walk_skill",
+        "chase",
+        "chase_tendency",
+        "aggression",
+        "clutch",
+        "sacrifice",
+        "sacrifice_ability",
+    ]
+
+    for prefix in prefixes:
+        st.session_state.pop(f"{prefix}_{key}", None)
+
+
 def apply_optimized_lineup_to_dashboard(
     optimized_lineup_names: list[str],
     *,
@@ -2508,12 +2775,25 @@ def render_expandable_player_editor(
     """
     key = player_editor_key(profile.name)
 
+    reset_token = player_editor_reset_token(profile.name)
+
+    def rk(name: str) -> str:
+        return f"{name}_{key}_{reset_token}"
+
     archetype_value = getattr(profile.archetype, "value", str(profile.archetype))
     handedness_value = getattr(profile.handedness, "value", str(profile.handedness))
 
     base_traits = getattr(profile, "base_traits")
-    effective_traits = getattr(profile, "effective_traits", base_traits)
+
     current_adj = get_profile_adjustment_dict(profile)
+
+    raw_effective_traits = getattr(profile, "effective_traits", None)
+    if raw_effective_traits is None:
+        effective_traits = base_traits
+    elif profile_player_mode(profile) == "gc_baseline" and not any(float(v) != 0.0 for v in current_adj.values()):
+        effective_traits = base_traits
+    else:
+        effective_traits = raw_effective_traits
 
     nudge_contact = int(round(float(current_adj.get("contact", 0.0))))
     nudge_power = int(round(float(current_adj.get("power", 0.0))))
@@ -2695,7 +2975,7 @@ def render_expandable_player_editor(
             new_name = st.text_input(
                 "Player name",
                 value=profile.name,
-                key=f"edit_name_{key}",
+                key=rk("edit_name"),
             )
 
         archetype_options = [a.value for a in PlayerArchetype]
@@ -2704,7 +2984,7 @@ def render_expandable_player_editor(
                 "Archetype",
                 options=archetype_options,
                 index=archetype_options.index(archetype_value) if archetype_value in archetype_options else 0,
-                key=f"edit_archetype_{key}",
+                key=rk("edit_archetype"),
             )
 
         handedness_options = ["R", "L", "S", "U"]
@@ -2713,7 +2993,7 @@ def render_expandable_player_editor(
                 "Handedness",
                 options=handedness_options,
                 index=handedness_options.index(handedness_value) if handedness_value in handedness_options else 3,
-                key=f"edit_handedness_{key}",
+                key=rk("edit_handedness"),
             )
 
         st.caption(
@@ -2764,7 +3044,7 @@ def render_expandable_player_editor(
                 -25,
                 25,
                 nudge_contact,
-                key=f"nudge_contact_{key}",
+                key=rk("nudge_contact"),
                 help=NUDGE_TOOLTIP_BY_FIELD["contact"],
             )
 
@@ -2774,7 +3054,7 @@ def render_expandable_player_editor(
                 -25,
                 25,
                 nudge_power,
-                key=f"nudge_power_{key}",
+                key=rk("nudge_power"),
                 help=NUDGE_TOOLTIP_BY_FIELD["power"]
             )
 
@@ -2784,7 +3064,7 @@ def render_expandable_player_editor(
                 -25,
                 25,
                 nudge_speed,
-                key=f"nudge_speed_{key}",
+                key=rk("nudge_speed"),
                 help=NUDGE_TOOLTIP_BY_FIELD["speed"]
             )
 
@@ -2794,7 +3074,7 @@ def render_expandable_player_editor(
                 -25,
                 25,
                 nudge_plate_discipline,
-                key=f"nudge_plate_discipline_{key}",
+                key=rk("nudge_plate_discipline"),
                 help=NUDGE_TOOLTIP_BY_FIELD["plate_discipline"]
             )
 
@@ -2818,6 +3098,8 @@ def render_expandable_player_editor(
                         },
                     )
                     initialize_editable_roster(st.session_state.optimizer_session_id)
+                    bump_player_editor_reset_token(profile.name)
+                    clear_player_editor_widget_state(profile.name)
                     st.success(f"Saved GC adjustment for {profile.name}.")
                     st.rerun()
                 except Exception as exc:
@@ -2835,6 +3117,8 @@ def render_expandable_player_editor(
                         player_name=profile.name,
                     )
                     initialize_editable_roster(st.session_state.optimizer_session_id)
+                    bump_player_editor_reset_token(profile.name)
+                    clear_player_editor_widget_state(profile.name)
                     st.success(f"Cleared GC adjustment for {profile.name}.")
                     st.rerun()
                 except Exception as exc:
@@ -2856,7 +3140,7 @@ def render_expandable_player_editor(
                 0,
                 100,
                 int(round(base_traits.contact)),
-                key=f"contact_{key}",
+                key=rk("contact"),
                 help=MANUAL_OVERRIDE_TOOLTIP_BY_FIELD["contact"],
             )
 
@@ -2865,7 +3149,7 @@ def render_expandable_player_editor(
                 0,
                 100,
                 int(round(base_traits.baserunning)),
-                key=f"baserunning_{key}",
+                key=rk("baserunning"),
                 help=MANUAL_OVERRIDE_TOOLTIP_BY_FIELD["baserunning"],
             )
 
@@ -2874,7 +3158,7 @@ def render_expandable_player_editor(
                 0,
                 100,
                 int(round(base_traits.walk_skill)),
-                key=f"walk_{key}",
+                key=rk("walk"),
                 help=MANUAL_OVERRIDE_TOOLTIP_BY_FIELD["walk_skill"],
             )
 
@@ -2883,7 +3167,7 @@ def render_expandable_player_editor(
                 0,
                 100,
                 int(round(base_traits.aggression)),
-                key=f"aggression_{key}",
+                key=rk("aggression"),
                 help=MANUAL_OVERRIDE_TOOLTIP_BY_FIELD["aggression"],
             )
 
@@ -2893,7 +3177,7 @@ def render_expandable_player_editor(
                 0,
                 100,
                 int(round(base_traits.power)),
-                key=f"power_{key}",
+                key=rk("power"),
                 help=MANUAL_OVERRIDE_TOOLTIP_BY_FIELD["power"],
             )
 
@@ -2902,7 +3186,7 @@ def render_expandable_player_editor(
                 0,
                 100,
                 int(round(base_traits.plate_discipline)),
-                key=f"plate_discipline_{key}",
+                key=rk("plate_discipline"),
                 help=MANUAL_OVERRIDE_TOOLTIP_BY_FIELD["plate_discipline"],
             )
 
@@ -2911,7 +3195,7 @@ def render_expandable_player_editor(
                 0,
                 100,
                 int(round(base_traits.chase_tendency)),
-                key=f"chase_{key}",
+                key=rk("chase"),
                 help=MANUAL_OVERRIDE_TOOLTIP_BY_FIELD["chase_tendency"],
             )
 
@@ -2920,7 +3204,7 @@ def render_expandable_player_editor(
                 0,
                 100,
                 int(round(base_traits.clutch)),
-                key=f"clutch_{key}",
+                key=rk("clutch"),
                 help=MANUAL_OVERRIDE_TOOLTIP_BY_FIELD["clutch"],
             )
 
@@ -2931,7 +3215,7 @@ def render_expandable_player_editor(
                 0,
                 100,
                 int(round(base_traits.speed)),
-                key=f"speed_{key}",
+                key=rk("speed"),
                 help=MANUAL_OVERRIDE_TOOLTIP_BY_FIELD["speed"],
             )
 
@@ -2940,7 +3224,7 @@ def render_expandable_player_editor(
                 0,
                 100,
                 int(round(base_traits.strikeout_tendency)),
-                key=f"strikeout_{key}",
+                key=rk("strikeout"),
                 help=MANUAL_OVERRIDE_TOOLTIP_BY_FIELD["strikeout_tendency"],
             )
 
@@ -2949,7 +3233,7 @@ def render_expandable_player_editor(
                 0,
                 100,
                 int(round(base_traits.sacrifice_ability)),
-                key=f"sacrifice_{key}",
+                key=rk("sacrifice"),
                 help=MANUAL_OVERRIDE_TOOLTIP_BY_FIELD["sacrifice_ability"],
             )
 
@@ -2990,9 +3274,17 @@ def render_expandable_player_editor(
                             traits=new_traits,
                         )
 
+                        bump_player_editor_reset_token(cleaned_name)
+                        clear_player_editor_widget_state(cleaned_name)
+
+                        if cleaned_name != profile.name:
+                            bump_player_editor_reset_token(profile.name)
+                            clear_player_editor_widget_state(profile.name)
+
                         st.session_state.coach_lab_workspace_mode = "custom"
                         st.success(f"Saved manual override for {cleaned_name}.")
                         st.rerun()
+
                 except Exception as exc:
                     st.error(f"Could not save player changes: {exc}")
 
@@ -3003,6 +3295,9 @@ def render_expandable_player_editor(
                         st.session_state.optimizer_session_id,
                         player_name=profile.name,
                     )
+                    initialize_editable_roster(st.session_state.optimizer_session_id)
+                    bump_player_editor_reset_token(profile.name)
+                    clear_player_editor_widget_state(profile.name)
                     st.success(f"Cleared saved GC adjustment for {profile.name}.")
                     st.rerun()
                 except Exception as exc:
@@ -3025,6 +3320,9 @@ def render_expandable_player_editor(
                         player_name=profile.name,
                         clear_gc_adjustment=True,
                     )
+                    initialize_editable_roster(st.session_state.optimizer_session_id)
+                    bump_player_editor_reset_token(profile.name)
+                    clear_player_editor_widget_state(profile.name)
                     st.success(f"Reverted {profile.name} to imported GC baseline.")
                     st.rerun()
                 except Exception as exc:
@@ -4724,15 +5022,16 @@ def main() -> None:
     st.title(APP_TITLE)
     st.caption(APP_SUBTITLE)
 
+    render_how_to_use_panel()
     render_team_switcher()
 
     run_settings = render_sidebar(backend_session)
     st.session_state.run_settings_cache = run_settings
 
-    render_how_to_use_panel()
     render_model_limitations_panel()
 
     render_team_entry_panel(backend_session)
+
     render_additional_gc_data_panel(backend_session)
     st.markdown("")
 
