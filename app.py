@@ -309,6 +309,10 @@ def get_backend_session() -> SessionStateSchema:
 def reset_team_scoped_ui_state() -> None:
     """
     Clear UI caches/results that should not bleed across teams.
+
+    This should NOT decide whether the import/build panel is open.
+    Callers can set st.session_state.show_team_loader after this function
+    when they intentionally want to open it, such as after creating a new team.
     """
     st.session_state.coach_lab_player_profiles_cache = []
     st.session_state.coach_lab_last_custom_eval = None
@@ -319,12 +323,19 @@ def reset_team_scoped_ui_state() -> None:
     st.session_state.last_completed_results = None
     st.session_state.run_status_tile = None
     st.session_state.coach_lab_saved_scenario_messages = []
+
     st.session_state.multi_gc_reconciliation_result = None
     st.session_state.multi_gc_final_records = None
     st.session_state.multi_gc_uploaded_file_names = []
     st.session_state.multi_gc_import_summary = None
     st.session_state.multi_gc_manual_merge_message = None
-    st.session_state.show_team_loader = True
+
+    st.session_state.additional_gc_preview = None
+    st.session_state.additional_gc_uploaded_file_names = []
+    st.session_state.additional_gc_apply_summary = None
+
+    st.session_state.show_team_loader = False
+
     clear_lineup_order_widget_state()
 
 
@@ -716,6 +727,7 @@ def render_team_switcher() -> None:
                         owner_user_id=current_user.user_id,
                         team_name=cleaned,
                     )
+
                     manager.attach_session_to_team(
                         st.session_state.optimizer_session_id,
                         team_id=new_team.team_id,
@@ -723,7 +735,6 @@ def render_team_switcher() -> None:
 
                     from core.analytics import safe_log_event
 
-                    # ✅ keep existing logging
                     safe_log_event(
                         event_type="team_created",
                         user_id=current_user.user_id,
@@ -736,16 +747,27 @@ def render_team_switcher() -> None:
                         },
                     )
 
-                    st.session_state.show_team_loader = True
-                    bump_team_entry_expander_token()
+                    safe_log_event(
+                        event_type="team_loaded",
+                        user_id=current_user.user_id,
+                        user_email=current_user.email,
+                        session_id=st.session_state.optimizer_session_id,
+                        team_id=new_team.team_id,
+                        metadata={
+                            "team_name": cleaned,
+                            "load_reason": "post_create_attach",
+                        },
+                    )
 
                     st.session_state.selected_team_id = new_team.team_id
-
                     st.session_state.sync_team_selector_dropdown = True
                     st.session_state.new_team_name = ""
                     st.session_state.clear_new_team_name_input = True
 
                     reset_team_scoped_ui_state()
+
+                    st.session_state.show_team_loader = True
+                    bump_team_entry_expander_token()
 
                     st.success(f"Created team: {cleaned}")
                     st.rerun()
