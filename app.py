@@ -3846,17 +3846,40 @@ def render_coach_lab(
 
         st.markdown("##### Coach decision workflows")
         st.caption(
-            "Use this area for the three most common decisions: who is absent tonight, where a new player fits, "
+            "Use this area for the most common decisions: who is hot/cold, pitcher matchps, who is absent tonight, where a new player fits, "
             "and whether your own lineup grades better or worse than the optimized one."
         )
 
-        workflow_cols = st.columns(3)
+        workflow_cols = st.columns(5)
+
         with workflow_cols[0]:
-            st.info("**Absent player tonight**\n\nBench him, then optimize or simulate again.")
+            st.info(
+                "**Hot or cold bat**\n\n"
+                "Use nudges to reflect a player swinging hot or in a slump, then re-run to see if it changes the lineup."
+            )
+
         with workflow_cols[1]:
-            st.info("**New player insertion**\n\nAdd a player below, place him in the order, then simulate.")
+            st.info(
+                "**Pitcher matchup**\n\n"
+                "Adjust a hitter up or down based on the opposing pitcher, then re-optimize to test the impact."
+            )
         with workflow_cols[2]:
-            st.info("**My lineup vs optimized**\n\nSimulate your order, save it, then compare it to the optimized order in charts.")
+            st.info(
+                "**Absent player tonight**\n\n"
+                "Bench him, then re-run the sim or optimization to adjust your lineup."
+            )
+
+        with workflow_cols[3]:
+            st.info(
+                "**New player insertion**\n\n"
+                "Add a player, place him in the order, then simulate to see where he fits best."
+            )
+
+        with workflow_cols[4]:
+            st.info(
+                "**My lineup vs optimized**\n\n"
+                "Simulate your lineup, save it, then compare it to the optimized version in charts."
+            )
 
         st.caption(
             "How to use these controls right now: "
@@ -3864,6 +3887,7 @@ def render_coach_lab(
             "Use Add player from archetype to test a new player. "
             "Reorder the lineup, click Simulate My Lineup, then click Save Scenario for Charts to compare it."
         )
+
         st.divider()
 
         lineup_action_col1, lineup_action_col2 = st.columns([1.45, 2.55])
