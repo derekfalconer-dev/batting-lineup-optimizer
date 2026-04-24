@@ -1247,30 +1247,37 @@ def render_how_to_use_panel() -> None:
         st.markdown("### How coaches are using this")
         st.caption("The most common decisions this tool helps with right now.")
 
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4, col5 = st.columns(5)
 
         with col1:
-            st.markdown("**1. Player absent tonight**")
+            st.markdown("**1. Adjust for a hot or cold bat**")
+            st.caption(
+                "Use the nudge sliders to reflect a player who’s hot or in a slump, then re-run the optimizer to see if it actually changes where they should hit."
+            )
+
+        with col2:
+            st.markdown("**2. Matchup against today’s pitcher**")
+            st.caption(
+                "Use nudges when you know a hitter matches up especially well or poorly against the opposing pitcher, "
+                "then re-optimize to see if the lineup should change."
+            )
+
+        with col3:
+            st.markdown("**3. Player absent tonight**")
             st.caption(
                 "Bench the absent player, then optimize or simulate again to see how the order should shift."
             )
 
-        with col2:
-            st.markdown("**2. Try a new player**")
+        with col4:
+            st.markdown("**4. Try a new player**")
             st.caption(
                 "Add a player from an archetype, place him in the order, and simulate how he changes the lineup."
             )
 
-        with col3:
-            st.markdown("**3. Compare your intuition**")
+        with col5:
+            st.markdown("**5. Compare your intuition**")
             st.caption(
                 "Set up the order you like, simulate it, then compare it against the optimized order."
-            )
-
-        with col4:
-            st.markdown("4. Adjust for a hot or cold bat")
-            st.caption(
-                "Use the nudge sliders to reflect a player who’s hot or in a slump, then re-run the optimizer to see if it actually changes where they should hit."
             )
 
 
@@ -1620,9 +1627,9 @@ def render_sidebar(session_state: SessionStateSchema) -> dict:
 
     innings_per_game = st.sidebar.slider("Innings / Game", 3, 9, 6)
 
-    continuous_batting = st.sidebar.checkbox("Continuous Batting", value=True)
+    continuous_batting = st.sidebar.checkbox("Continuous Batting", value=False)
 
-    use_inning_run_limit = st.sidebar.checkbox("Inning Run Limit", value=True)
+    use_inning_run_limit = st.sidebar.checkbox("Inning Run Limit", value=False)
 
     inning_run_limit = None
     if use_inning_run_limit:
@@ -1631,10 +1638,10 @@ def render_sidebar(session_state: SessionStateSchema) -> dict:
     diamond_size = st.sidebar.selectbox(
         "Diamond Size",
         ["46/60", "50/70", "60/90"],
-        index=1,
+        index=2,
     )
 
-    leadoffs_allowed = st.sidebar.checkbox("Leadoffs Allowed", value=False)
+    leadoffs_allowed = st.sidebar.checkbox("Leadoffs Allowed", value=True)
 
     st.sidebar.markdown("---")
 
