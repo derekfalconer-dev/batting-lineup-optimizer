@@ -1625,7 +1625,7 @@ def render_sidebar(session_state: SessionStateSchema) -> dict:
     st.sidebar.markdown("## ⚾ Game Rules")
     st.sidebar.caption("Set the game conditions.")
 
-    innings_per_game = st.sidebar.slider("Innings / Game", 3, 9, 6)
+    innings_per_game = st.sidebar.slider("Innings / Game", 3, 9, 7)
 
     continuous_batting = st.sidebar.checkbox("Continuous Batting", value=False)
 
@@ -3885,6 +3885,7 @@ def render_coach_lab(
             "How to use these controls right now: "
             "Bench an absent player in the active lineup below. "
             "Use Add player from archetype to test a new player. "
+            "Use player drop downs to apply nudges to bump qualities to adjust for hot/cold bat or pitcher matchups. "
             "Reorder the lineup, click Simulate My Lineup, then click Save Scenario for Charts to compare it."
         )
 
