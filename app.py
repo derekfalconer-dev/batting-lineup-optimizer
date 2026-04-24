@@ -1902,11 +1902,9 @@ def render_team_entry_panel(session_state: SessionStateSchema) -> None:
     header = "Build team, change source, or import additional data"
     subheader = "Upload more GameChanger files or create a new team"
 
-    # Keep the "current team source" summary visible when a team is already loaded.
+    # Source/change workflow stays available, but collapsed because it is occasional.
     if session_state.data_source and not st.session_state.get("show_team_loader", True):
-        loaded_col1, loaded_col2 = st.columns([3, 1])
-
-        with loaded_col1:
+        with st.expander("Current team source / change source", expanded=False):
             render_team_loaded_next_steps(session_state)
 
             import_summary = st.session_state.get("multi_gc_import_summary")
@@ -1918,17 +1916,14 @@ def render_team_entry_panel(session_state: SessionStateSchema) -> None:
                         f"into {import_summary.get('final_player_count', 0)} merged players."
                     )
 
-        with loaded_col2:
-            with st.container(border=True):
-                st.markdown("### Team source")
-                if st.button(
-                    "Change Team Source",
-                    use_container_width=True,
-                    key="show_team_loader_button",
-                ):
-                    st.session_state.show_team_loader = True
-                    bump_team_entry_expander_token()
-                    st.rerun()
+            if st.button(
+                "Change Team Source",
+                use_container_width=True,
+                key="show_team_loader_button",
+            ):
+                st.session_state.show_team_loader = True
+                bump_team_entry_expander_token()
+                st.rerun()
 
     expander_open = bool(st.session_state.get("show_team_loader", False))
     token = team_entry_expander_token()
