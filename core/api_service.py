@@ -660,6 +660,128 @@ def run_optimization(
     return result
 
 
+def analyze_absent_player_shock(
+    session_id: str,
+    *,
+    output_dir: str | Path = "output",
+    target_runs: float = 4.0,
+    optimizer_config: dict[str, Any] | None = None,
+    rules: Any | None = None,
+) -> dict[str, Any]:
+    """
+    Leave-one-player-out analysis.
+
+    For each currently active player:
+    - remove that player from the active profile list
+    - re-run the existing optimizer workflow
+    - compare against the full-roster optimized baseline
+
+    This does not mutate bench state, lineup order, saved scenarios, or team persistence.
+    """
+    manager = get_session_manager()
+    session = manager.get_session(session_id)
+
+    if not session.is_ready_to_run:
+        raise ValueError(f"Session {session_id} is not ready to run absent-player shock analysis.")
+
+    active_profiles = _active_profiles_for_session(session)
+    if not active_profiles:
+        active_profiles = _build_profiles_from_session_inputs(session)
+
+    if len(active_profiles) < 2:
+        raise ValueError("At least two active players are required for absent-player shock analysis.")
+
+    merged_adjustments = _merged_adjustments_for_session(session)
+
+    shock_config = dict(optimizer_config or {})
+    shock_config.setdefault("mode", "fast")
+    shock_config.setdefault("target_runs", target_runs)
+    shock_config.setdefault("search_games", 40)
+    shock_config.setdefault("refine_games", 1200)
+    shock_config.setdefault("top_n", 3)
+    shock_config.setdefault("seed", 42)
+    shock_config.setdefault("beam_width", 8)
+    shock_config.setdefault("max_rounds", 6)
+
+    baseline = run_optimizer_workflow(
+        data_source=session.data_source,
+        csv_path=session.csv_path,
+        adjustments_path=session.adjustments_path,
+        roster_path=session.roster_path,
+        rules=rules,
+        output_dir=output_dir,
+        target_runs=target_runs,
+        optimizer_config=shock_config,
+        present=True,
+        adjustments_by_name=merged_adjustments,
+        profiles_override=active_profiles,
+    )
+
+    baseline_metrics = baseline.optimized.metrics
+
+    rows: list[dict[str, Any]] = []
+
+    for profile in active_profiles:
+        remaining_profiles = [
+            p for p in active_profiles
+            if p.name != profile.name
+        ]
+
+        if len(remaining_profiles) < 1:
+            continue
+
+        shock_result = run_optimizer_workflow(
+            data_source=session.data_source,
+            csv_path=session.csv_path,
+            adjustments_path=session.adjustments_path,
+            roster_path=session.roster_path,
+            rules=rules,
+            output_dir=output_dir,
+            target_runs=target_runs,
+            optimizer_config=shock_config,
+            present=True,
+            adjustments_by_name=merged_adjustments,
+            profiles_override=remaining_profiles,
+        )
+
+        shock_metrics = shock_result.optimized.metrics
+
+        rows.append(
+            {
+                "player": profile.name,
+                "baseline_mean_runs": float(baseline_metrics.mean_runs),
+                "absent_mean_runs": float(shock_metrics.mean_runs),
+                "runs_lost": float(baseline_metrics.mean_runs - shock_metrics.mean_runs),
+                "baseline_prob_ge_target": float(baseline_metrics.prob_ge_target),
+                "absent_prob_ge_target": float(shock_metrics.prob_ge_target),
+                "target_prob_lost": float(
+                    baseline_metrics.prob_ge_target - shock_metrics.prob_ge_target
+                ),
+                "baseline_p10": float(baseline_metrics.p10_runs),
+                "absent_p10": float(shock_metrics.p10_runs),
+                "floor_lost": float(baseline_metrics.p10_runs - shock_metrics.p10_runs),
+                "baseline_lineup": list(baseline.optimized.lineup),
+                "absent_lineup": list(shock_result.optimized.lineup),
+            }
+        )
+
+    rows.sort(key=lambda row: row["runs_lost"], reverse=True)
+
+    return {
+        "baseline": {
+            "mean_runs": float(baseline_metrics.mean_runs),
+            "prob_ge_target": float(baseline_metrics.prob_ge_target),
+            "p10_runs": float(baseline_metrics.p10_runs),
+            "p90_runs": float(baseline_metrics.p90_runs),
+            "lineup": list(baseline.optimized.lineup),
+        },
+        "rows": rows,
+        "target_runs": float(target_runs),
+        "n_players": len(active_profiles),
+        "optimizer_config": shock_config,
+    }
+
+
 def get_results(session_id: str) -> WorkflowResponseSchema:
     manager = get_session_manager()
     session = manager.get_session(session_id)
@@ -1225,6 +1347,7 @@ def save_current_scenario(
                 "n_games": int(raw.get("n_games", 0)),
                 "target_runs": float(raw.get("target_runs", 0.0)),
                 "runs_scored_distribution": [int(x) for x in raw.get("runs_scored_distribution", [])],
+                "simulation_telemetry": dict(raw.get("simulation_telemetry", {}) or {}),
             }
 
     scenario = manager.save_scenario(

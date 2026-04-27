@@ -1,8 +1,9 @@
 import random
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 from core.models import Player, RulesConfig
 from core.baserunning import advance_runners, maybe_steal
+from core.simulation_telemetry import SimulationTelemetry
 
 
 BaseState = List[Optional[Player]]  # [runner_on_1st, runner_on_2nd, runner_on_3rd]
@@ -128,6 +129,7 @@ def simulate_half_inning(
     start_index: int,
     rules: RulesConfig,
     rng: random.Random,
+    telemetry: SimulationTelemetry | None = None,
 ) -> Tuple[int, int]:
     """
     Simulate one half inning.
@@ -140,6 +142,8 @@ def simulate_half_inning(
     batter_index = start_index
     bases: BaseState = [None, None, None]
 
+    inning_events: list[dict[str, Any]] = []
+
     while outs < 3 and runs < rules.max_runs_per_inning:
         # optional steal attempt before the pitch / plate appearance
         bases, steal_outs = maybe_steal(bases, outs, rng, rules)
@@ -149,7 +153,11 @@ def simulate_half_inning(
             break
 
         batter = lineup[batter_index]
+        lineup_spot = batter_index + 1
         outcome = sample_plate_appearance(batter, rng)
+
+        bases_occupied_before = sum(1 for runner in bases if runner is not None)
+        outs_before_play = outs
 
         bases, play_runs, play_outs = advance_runners(
             bases,
@@ -160,6 +168,18 @@ def simulate_half_inning(
             outs_before_play=outs,
         )
 
+        if telemetry is not None:
+            inning_events.append(
+                telemetry.record_plate_appearance(
+                    player_name=batter.name,
+                    lineup_spot=lineup_spot,
+                    outcome=outcome,
+                    bases_occupied_before=bases_occupied_before,
+                    outs_before=outs_before_play,
+                    play_runs=play_runs,
+                )
+            )
+
         # Respect inning run cap
         runs += play_runs
         if runs > rules.max_runs_per_inning:
@@ -169,6 +189,9 @@ def simulate_half_inning(
 
         batter_index = (batter_index + 1) % len(lineup)
 
+    if telemetry is not None:
+        telemetry.finalize_inning(inning_events, inning_runs=runs)
+
     return runs, batter_index
 
 
@@ -176,6 +199,7 @@ def simulate_game(
     lineup: List[Player],
     rules: RulesConfig,
     rng: Optional[random.Random] = None,
+    telemetry: SimulationTelemetry | None = None,
 ) -> int:
     """
     Simulate a full game and return total runs scored.
@@ -186,12 +210,16 @@ def simulate_game(
     total_runs = 0
     batter_index = 0
 
+    if telemetry is not None and not telemetry.lineup:
+        telemetry.lineup = [p.name for p in lineup]
+
     for _ in range(rules.innings):
         inning_runs, batter_index = simulate_half_inning(
             lineup=lineup,
             start_index=batter_index,
             rules=rules,
             rng=rng,
+            telemetry=telemetry,
         )
         total_runs += inning_runs
 

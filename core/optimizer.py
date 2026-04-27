@@ -3,7 +3,7 @@ import random
 import time
 from typing import Any, Dict, List, Tuple
 
-from core.evaluator import evaluate_lineup
+from core.evaluator import evaluate_lineup, evaluate_lineup_with_telemetry
 from core.models import Player, RulesConfig
 
 
@@ -13,16 +13,31 @@ def evaluate_lineup_with_meta(
     n_games: int,
     target_runs: float,
     seed: int,
+    *,
+    display_name: str = "Lineup",
+    collect_telemetry: bool = False,
 ) -> Dict[str, Any]:
-    result = evaluate_lineup(
-        lineup=lineup,
-        rules=rules,
-        n_games=n_games,
-        target_runs=target_runs,
-        seed=seed,
-    )
+    telemetry = None
 
-    return {
+    if collect_telemetry:
+        result, telemetry = evaluate_lineup_with_telemetry(
+            lineup=lineup,
+            rules=rules,
+            n_games=n_games,
+            target_runs=target_runs,
+            seed=seed,
+            display_name=display_name,
+        )
+    else:
+        result = evaluate_lineup(
+            lineup=lineup,
+            rules=rules,
+            n_games=n_games,
+            target_runs=target_runs,
+            seed=seed,
+        )
+
+    payload = {
         "lineup": [p.name for p in lineup],
         "players": lineup[:],
         "mean_runs": result.mean_runs,
@@ -35,6 +50,12 @@ def evaluate_lineup_with_meta(
         "n_games": result.n_games,
         "runs_scored_distribution": result.runs_scored_distribution,
     }
+
+    if telemetry is not None:
+        payload["simulation_telemetry"] = telemetry
+
+    return payload
+
 
 def print_results(title: str, results: List[Dict[str, Any]]):
     print(f"\n===== {title} =====")
@@ -241,6 +262,8 @@ def local_beam_search(
             n_games=refine_games,
             target_runs=target_runs,
             seed=seed + 1000 + idx,
+            display_name=f"Optimized Candidate {idx}",
+            collect_telemetry=True,
         )
         refined.append(refined_result)
 

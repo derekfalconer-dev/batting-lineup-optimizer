@@ -4,6 +4,7 @@ from typing import List, Optional
 
 from core.models import LineupResult, Player, RulesConfig
 from core.simulator import simulate_game
+from core.simulation_telemetry import SimulationTelemetry
 
 
 def compute_std(values: List[float]) -> float:
@@ -82,3 +83,64 @@ def evaluate_lineup(
         n_games=n_games,
         runs_scored_distribution=runs_scored,
     )
+
+
+def evaluate_lineup_with_telemetry(
+    lineup: List[Player],
+    rules: RulesConfig,
+    n_games: int = 1000,
+    target_runs: float = 4.0,
+    seed: Optional[int] = None,
+    display_name: str = "Lineup",
+) -> tuple[LineupResult, dict]:
+    """
+    Evaluate a lineup and also collect simulator-derived baseball telemetry.
+
+    This uses the same simulation loop as evaluate_lineup, but passes a telemetry
+    object into each simulated game so charts can be driven by real simulated events.
+    """
+    rng = random.Random(seed)
+    telemetry = SimulationTelemetry(
+        lineup_name=display_name,
+        lineup=[p.name for p in lineup],
+        n_games=int(n_games),
+        innings=int(n_games) * int(rules.innings),
+    )
+
+    runs_scored = [
+        simulate_game(lineup, rules, rng, telemetry=telemetry)
+        for _ in range(n_games)
+    ]
+
+    mean_runs = mean(runs_scored)
+    median_runs = median(runs_scored)
+    std_runs = compute_std(runs_scored)
+
+    downside_dev = compute_downside_deviation(runs_scored, target_runs)
+    if downside_dev == 0:
+        sortino = float("inf") if mean_runs > target_runs else 0.0
+    else:
+        sortino = (mean_runs - target_runs) / downside_dev
+
+    prob_ge_target = sum(1 for x in runs_scored if x >= target_runs) / float(n_games)
+
+    sorted_runs = sorted(runs_scored)
+    p10_runs = percentile(sorted_runs, 0.10)
+    p90_runs = percentile(sorted_runs, 0.90)
+
+    result = LineupResult(
+        lineup=[p.name for p in lineup],
+        mean_runs=mean_runs,
+        median_runs=median_runs,
+        std_runs=std_runs,
+        prob_ge_target=prob_ge_target,
+        target_runs=target_runs,
+        downside_deviation=downside_dev,
+        sortino=sortino,
+        p10_runs=p10_runs,
+        p90_runs=p90_runs,
+        n_games=n_games,
+        runs_scored_distribution=runs_scored,
+    )
+
+    return result, telemetry.as_dict()
