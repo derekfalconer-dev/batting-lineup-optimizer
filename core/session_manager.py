@@ -48,6 +48,9 @@ class TeamRecord:
 
     import_history: list[dict[str, Any]] = field(default_factory=list)
 
+    rules_preset: str = "High School"
+    rules_config: dict[str, Any] = field(default_factory=dict)
+
     aggregate_player_records: dict[str, AggregatePlayerRecord] = field(default_factory=dict)
     player_aliases: dict[str, str] = field(default_factory=dict)
 
@@ -307,6 +310,8 @@ class SessionManager:
             "adjustments_path": team.adjustments_path,
             "roster_path": team.roster_path,
             "import_history": list(team.import_history),
+            "rules_preset": team.rules_preset,
+            "rules_config": dict(team.rules_config),
             "aggregate_player_records": {
                 player_id: record.to_dict()
                 for player_id, record in team.aggregate_player_records.items()
@@ -330,6 +335,8 @@ class SessionManager:
             adjustments_path=data.get("adjustments_path"),
             roster_path=data.get("roster_path"),
             import_history=list(data.get("import_history", [])),
+            rules_preset=str(data.get("rules_preset", "High School")),
+            rules_config=dict(data.get("rules_config", {})),
             aggregate_player_records={
                 str(player_id): AggregatePlayerRecord.from_dict(record_payload)
                 for player_id, record_payload in data.get("aggregate_player_records", {}).items()
@@ -373,6 +380,8 @@ class SessionManager:
             coach_adjustments_by_name={},
             saved_scenarios=[],
             import_history=[],
+            rules_preset="High School",
+            rules_config={},
             aggregate_player_records={},
             player_aliases={},
         )

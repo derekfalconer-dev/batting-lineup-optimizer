@@ -53,6 +53,7 @@ from core.api_service import (
     update_player_traits,
     apply_gamechanger_data_addition,
     preview_gamechanger_data_addition,
+    analyze_absent_player_shock,
 )
 
 from core.chart_data import (
@@ -212,6 +213,1053 @@ def ensure_ui_state() -> None:
     if "team_entry_expander_token" not in st.session_state:
         st.session_state.team_entry_expander_token = 0
 
+    if "absent_player_shock" not in st.session_state:
+        st.session_state.absent_player_shock = None
+
+    if "absent_player_shock_status" not in st.session_state:
+        st.session_state.absent_player_shock_status = None
+
+    if "coach_lab_chart_compare_items" not in st.session_state:
+        st.session_state.coach_lab_chart_compare_items = []
+
+
+def run_absent_player_shock_analysis(run_settings: dict) -> None:
+    with st.spinner("Testing one absent-player scenario at a time, can take up to 2 min..."):
+        shock_optimizer_config = dict(run_settings["optimizer_config"])
+        shock_optimizer_config.update(
+            {
+                "search_games": 40,
+                "refine_games": 1200,
+                "top_n": 3,
+                "beam_width": 8,
+                "max_rounds": 6,
+            }
+        )
+
+        shock = analyze_absent_player_shock(
+            st.session_state.optimizer_session_id,
+            output_dir=st.session_state.output_dir,
+            target_runs=run_settings["target_runs"],
+            optimizer_config=shock_optimizer_config,
+            rules=RulesConfig(**run_settings["rules_config"]),
+        )
+
+        for row in shock.get("rows", []) or []:
+            row["absent_lineup"] = complete_lineup_with_remaining_active_players(
+                list(row.get("absent_lineup", [])),
+                absent_player_name=str(row.get("player", "")),
+            )
+
+        st.session_state.absent_player_shock = shock
+
+        n_players = int(shock.get("n_players", 0))
+        st.session_state.absent_player_shock_status = (
+            f"Shock chart complete — tested {n_players} missing-player scenarios "
+            "plus the full-roster baseline."
+        )
+
+
+def complete_lineup_with_remaining_active_players(
+    lineup_names: list[str],
+    *,
+    absent_player_name: str | None = None,
+) -> list[str]:
+    """
+    The optimizer often returns only the simulated batting group, especially
+    when continuous batting is off. For Coach Lab ordering, we still want every
+    active non-benched player represented so applying a suggested order does not
+    drop reserve players.
+    """
+    suggested = [str(name) for name in lineup_names if str(name).strip()]
+    absent = str(absent_player_name or "").strip()
+
+    editable_profiles = get_editable_roster_for_ui()
+    benched_names = set(get_benched_player_names_for_ui())
+
+    active_names = [
+        profile.name
+        for profile in editable_profiles
+        if profile.name not in benched_names and profile.name != absent
+    ]
+
+    seen = set()
+    completed = []
+
+    for name in suggested + active_names:
+        if name == absent:
+            continue
+        if name in seen:
+            continue
+        seen.add(name)
+        completed.append(name)
+
+    return completed
+
+
+def render_absent_player_shock_panel(run_settings: dict) -> None:
+    with st.expander("Absent Player Shock Chart", expanded=True):
+        st.caption(
+            """
+            Quantifies how much run production drops if any starter is missing.
+            See which player your lineup can least afford to lose. 
+            The app removes one active player at a time, re-optimizes the remaining lineup, 
+            and ranks the offensive drop-off. 
+            Uses hundreds of thousands of simulations to estimate each player's
+            true lineup impact. Can take up to ~2 minutes."""
+        )
+
+        if st.button(
+            "Run Shock Analysis",
+            use_container_width=True,
+            key="shock_panel_run_absent_player_analysis",
+        ):
+            try:
+                run_absent_player_shock_analysis(run_settings)
+                st.success(st.session_state.absent_player_shock_status)
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Could not generate shock chart: {exc}")
+
+        status = st.session_state.get("absent_player_shock_status")
+        if status:
+            st.success(status)
+
+        shock = st.session_state.get("absent_player_shock")
+        if not shock:
+            st.info("Click **Generate Shock Chart** above in Coach Action to populate this chart.")
+            return
+
+        rows = list(shock.get("rows", []))
+
+        for row in rows:
+            row["absent_lineup"] = complete_lineup_with_remaining_active_players(
+                list(row.get("absent_lineup", [])),
+                absent_player_name=str(row.get("player", "")),
+            )
+
+        if not rows:
+            st.info("No absent-player results available yet.")
+            return
+
+        top = rows[0]
+
+        st.markdown("#### Who can you least afford to lose?")
+        st.metric(
+            label=top["player"],
+            value=f"{top['runs_lost']:.2f} runs/game lost",
+        )
+
+        chart_df = pd.DataFrame(rows)
+        chart_df["Runs Lost"] = chart_df["runs_lost"]
+        chart_df["Player"] = chart_df["player"]
+        chart_df["Offense Impact"] = -chart_df["runs_lost"]
+        chart_df["Goal Odds Impact"] = -chart_df["target_prob_lost"]
+
+        target_runs = float(shock.get("target_runs", run_settings.get("target_runs", 4.0)))
+
+        chart = (
+            alt.Chart(chart_df)
+            .mark_bar(cornerRadiusTopRight=6, cornerRadiusBottomRight=6)
+            .encode(
+                y=alt.Y(
+                    "Player:N",
+                    sort="-x",
+                    title=None,
+                ),
+                x=alt.X(
+                    "Runs Lost:Q",
+                    title="Lineup impact if player is unavailable",
+                ),
+                tooltip=[
+                    alt.Tooltip("Player:N", title="If this player is out"),
+                    alt.Tooltip("Offense Impact:Q", title="Runs/game change", format="+.2f"),
+                    alt.Tooltip(
+                        "Goal Odds Impact:Q",
+                        title=f"Odds change for {target_runs:.0f}+ runs",
+                        format="+.1%",
+                    ),
+                ],
+            )
+            .properties(height=max(280, 32 * len(rows)))
+        )
+
+        st.altair_chart(chart, use_container_width=True)
+
+        target_runs = float(shock.get("target_runs", run_settings.get("target_runs", 4.0)))
+
+        st.markdown("#### Suggested orders if a player is out")
+        st.caption(
+            "Click the Use button on the row that matches tonight’s missing player. "
+            "The app will bench that player and load the re-optimized order "
+            "in the Active Batting Order panel above."
+        )
+
+        header_cols = st.columns([1.65, 0.75, 1.1, 1.0, 3.25])
+        header_cols[0].markdown("**If This Player Is Out**")
+        header_cols[1].markdown("**Apply**")
+        header_cols[2].markdown("**Runs/Game**")
+        header_cols[3].markdown(f"**Odds of {target_runs:.1f}+**")
+        header_cols[4].markdown("**Suggested Batting Order**")
+
+        st.markdown(
+            "<hr style='margin:.2rem 0 .5rem 0; border-color:rgba(255,255,255,.22);'>",
+            unsafe_allow_html=True,
+        )
+
+        for idx, row in enumerate(rows):
+            player_name = str(row.get("player", "Unknown player"))
+            suggested_order = complete_lineup_with_remaining_active_players(
+                list(row.get("absent_lineup", [])),
+                absent_player_name=player_name,
+            )
+
+            runs_change = -float(row["runs_lost"])
+            chance_change = -float(row["target_prob_lost"])
+
+            row_cols = st.columns([1.65, 0.75, 1.1, 1.0, 3.25])
+
+            with row_cols[0]:
+                st.markdown(f"**{player_name}**")
+
+            with row_cols[1]:
+                if st.button(
+                    "Use",
+                    key=f"apply_absent_order_{idx}_{player_editor_key(player_name)}",
+                    help=f"Apply suggested order for when {player_name} is out",
+                ):
+                    try:
+                        bench_player(
+                            st.session_state.optimizer_session_id,
+                            player_name=player_name,
+                        )
+
+                        apply_lineup_to_active_roster(
+                            st.session_state.optimizer_session_id,
+                            lineup_names=suggested_order,
+                            preserve_result=True,
+                        )
+
+                        set_custom_lineup(
+                            st.session_state.optimizer_session_id,
+                            lineup_names=suggested_order,
+                        )
+
+                        st.session_state.coach_lab_workspace_mode = "custom"
+                        clear_lineup_order_widget_state()
+
+                        st.success(
+                            f"Benched {player_name} and applied the suggested batting order."
+                        )
+                        st.rerun()
+
+                    except Exception as exc:
+                        st.error(f"Could not apply suggested order: {exc}")
+
+            with row_cols[2]:
+                st.markdown(f"**{runs_change:+.2f}**<br><span style='opacity:.72;'>runs/game</span>", unsafe_allow_html=True)
+
+            with row_cols[3]:
+                st.markdown(f"**{chance_change:+.1%}**")
+
+            with row_cols[4]:
+                st.markdown(
+                    f"<div style='font-size:0.84rem; opacity:.82; line-height:1.38; max-width:420px;'>"
+                    f"{' → '.join(suggested_order)}"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+            st.markdown(
+                "<hr style='margin:.45rem 0 .65rem 0; border:0; border-top:1px solid rgba(255,255,255,.16);'>",
+                unsafe_allow_html=True,
+            )
+
+        st.caption(
+            "Each backup batting order is re-optimized with that player removed. "
+            "Use it as a starting point, then adjust for defense, pitching, and game context."
+        )
+
+
+def build_pressure_wave_rows(lineup_profiles: list) -> list[dict]:
+    rows = []
+
+    for idx, profile in enumerate(lineup_profiles, start=1):
+        traits = getattr(profile, "effective_traits", getattr(profile, "base_traits", None))
+        if traits is None:
+            continue
+
+        contact = float(getattr(traits, "contact", 0.0))
+        discipline = float(getattr(traits, "plate_discipline", 0.0))
+        speed = float(getattr(traits, "speed", 0.0))
+        power = float(getattr(traits, "power", 0.0))
+        baserunning = float(getattr(traits, "baserunning", 0.0))
+
+        pressure_score = (
+            0.34 * contact
+            + 0.24 * discipline
+            + 0.18 * speed
+            + 0.14 * power
+            + 0.10 * baserunning
+        )
+
+        rows.append(
+            {
+                "Spot": idx,
+                "Player": profile.name,
+                "Pressure Score": round(max(0.0, min(100.0, pressure_score)), 1),
+                "Contact": round(contact, 1),
+                "Discipline": round(discipline, 1),
+                "Speed": round(speed, 1),
+                "Power": round(power, 1),
+            }
+        )
+
+    return rows
+
+
+def short_player_label(name: str) -> str:
+    """
+    Compact chart label for crowded x-axes.
+    Examples:
+    - Cy Falconer -> C.F.
+    - Rogan Johnson -> R.J.
+    - Luke Tourtellott -> L.T.
+    """
+    parts = [p for p in str(name).strip().split() if p]
+    if not parts:
+        return ""
+
+    if len(parts) == 1:
+        return parts[0][:3]
+
+    return ".".join(part[0].upper() for part in parts[:2]) + "."
+
+
+def get_simulation_telemetry_from_chart_item(item) -> dict | None:
+    if item is None:
+        return None
+
+    if isinstance(item, dict):
+        telemetry = item.get("simulation_telemetry")
+        return telemetry if isinstance(telemetry, dict) else None
+
+    telemetry = getattr(item, "simulation_telemetry", None)
+    if isinstance(telemetry, dict):
+        return telemetry
+
+    return None
+
+
+def build_signature_rows_from_telemetry(
+    telemetry: dict | None,
+    *,
+    lineup_name: str = "Lineup",
+) -> list[dict]:
+    if not telemetry:
+        return []
+
+    rows = []
+    for row in telemetry.get("player_rows", []) or []:
+        out = dict(row)
+        out["Lineup"] = lineup_name
+        rows.append(out)
+
+    rows.sort(key=lambda r: int(r.get("Spot", 0)))
+    return rows
+
+
+def render_pressure_wave_panel(lineup_profiles: list) -> None:
+    st.markdown("### Pressure Wave")
+    with st.expander("Lineup Pressure Wave", expanded=False):
+        st.caption(
+            "Pressure Wave shows where your lineup applies sustained offensive pressure. "
+            "It combines contact, on-base skill, speed, power, and baserunning to estimate "
+            "which batting spots can stress pitchers, force defensive mistakes, and keep innings alive."
+        )
+
+        rows = build_pressure_wave_rows(lineup_profiles)
+
+        if len(rows) < 2:
+            st.info("Add at least two active lineup players to build the Pressure Wave.")
+            return
+
+        df = pd.DataFrame(rows)
+
+        df["Spot"] = pd.to_numeric(df["Spot"], errors="coerce").astype(int)
+        df["Player"] = df["Player"].astype(str)
+        df["Player Label"] = df["Player"].apply(short_player_label)
+        df = df.sort_values(["Lineup", "Spot"])
+
+        avg_pressure = float(df["Pressure Score"].mean())
+        peak_row = df.sort_values("Pressure Score", ascending=False).iloc[0]
+
+        metric_cols = st.columns(3)
+        metric_cols[0].metric("Pressure Index", f"{avg_pressure:.0f}/100")
+        metric_cols[1].metric("Biggest Pressure Spot", f"#{int(peak_row['Spot'])}")
+        metric_cols[2].metric("Primary Rally Igniter", str(peak_row["Player"]))
+
+        pressure_std = float(df["Pressure Score"].std())
+
+        if pressure_std < 8:
+            diagnosis = "Very balanced lineup pressure."
+        elif pressure_std < 14:
+            diagnosis = "Moderate peaks with a few pressure pockets."
+        else:
+            diagnosis = "High-variance lineup with big peaks and possible dead zones."
+
+        st.success(f"Wave diagnosis: {diagnosis}")
+
+        base = alt.Chart(df).encode(
+            x=alt.X(
+                "Player Label:N",
+                title="Batting order",
+                sort=None,
+                axis=alt.Axis(labelAngle=-45, labelAlign="right"),
+            ),
+            y=alt.Y(
+                "Pressure Score:Q",
+                title="Pressure on pitcher / defense",
+                scale=alt.Scale(domain=[0, 100]),
+            ),
+            tooltip=[
+                alt.Tooltip("Spot:O", title="Batting spot"),
+                alt.Tooltip("Player:N"),
+                alt.Tooltip("Pressure Score:Q", title="Pressure score", format=".1f"),
+                alt.Tooltip("Contact:Q", format=".1f"),
+                alt.Tooltip("Discipline:Q", format=".1f"),
+                alt.Tooltip("Speed:Q", format=".1f"),
+                alt.Tooltip("Power:Q", format=".1f"),
+                alt.Tooltip("Estimated Pitches/PA:Q", title="Estimated pitches/PA", format=".2f"),
+                alt.Tooltip("Walk Rate:Q", title="Walk rate", format=".1%"),
+                alt.Tooltip("Deep Count Rate:Q", title="Deep-count PA rate", format=".1%"),
+            ],
+        )
+
+        wave = base.mark_area(
+            opacity=0.35,
+            interpolate="monotone",
+        )
+
+        line = base.mark_line(
+            point=True,
+            interpolate="monotone",
+        )
+
+        chart = (wave + line).properties(height=340)
+
+        st.altair_chart(chart, use_container_width=True)
+
+        st.info(
+            "How to read it:\n"
+            "• Peaks = pressure points where rallies often start or grow\n"
+            "• Valleys = possible lineup dead zones where innings may stall\n"
+            "• Back-to-back peaks can create sustained pressure on pitch counts and defense\n"
+            "• A smoother wave often means deeper, tougher lineups"
+        )
+
+        st.caption(
+            "Coach read: Look for dead zones you may want to break up, and for clusters of pressure that can wear down pitchers. "
+            "In youth baseball, sustained pressure often creates walks, errors, and big innings."
+        )
+
+        pretty_rows = [
+            {
+                "Spot": row["Spot"],
+                "Player": row["Player"],
+                "Pressure": row["Pressure Score"],
+                "Why It Matters": (
+                    "Can stress the defense"
+                    if row["Pressure Score"] >= 70
+                    else "Solid lineup spot"
+                    if row["Pressure Score"] >= 55
+                    else "Possible dead zone"
+                ),
+            }
+            for row in rows
+        ]
+
+
+def render_pressure_wave_comparison_panel(
+    *,
+    results: WorkflowResponseSchema | None,
+) -> None:
+    st.markdown("### Pressure Wave")
+
+    with st.expander("Pressure Wave", expanded=True):
+
+        compare_items = list(st.session_state.get("coach_lab_chart_compare_items", []))
+
+        st.caption(
+            f"Pressure Wave is plotting {len(compare_items)} selected lineup scenario"
+            f"{'' if len(compare_items) == 1 else 's'}."
+        )
+
+        if not compare_items:
+            saved_scenarios = get_saved_scenarios_for_ui()
+            custom_eval_payload = st.session_state.get("coach_lab_last_custom_eval")
+
+            compare_items = build_chart_compare_set(
+                results=results,
+                custom_eval_payload=custom_eval_payload,
+                saved_scenarios=saved_scenarios,
+                include_live_custom=bool(st.session_state.get("coach_lab_include_live_custom", True)),
+                include_random_and_worst=False,
+            )
+
+        rows = []
+
+        for item in compare_items:
+            if isinstance(item, dict):
+                lineup_name = str(item.get("display_name", "Lineup"))
+            else:
+                lineup_name = str(getattr(item, "display_name", "Lineup"))
+
+            telemetry = get_simulation_telemetry_from_chart_item(item)
+            lineup_rows = build_signature_rows_from_telemetry(
+                telemetry,
+                lineup_name=lineup_name,
+            )
+            rows.extend(lineup_rows)
+
+        if len(rows) < 2:
+            st.caption("Simulate or save a lineup to build the Pressure Wave chart.")
+            return
+
+        df = pd.DataFrame(rows)
+
+        df["Spot"] = pd.to_numeric(df["Spot"], errors="coerce").astype(int)
+        df["Player"] = df["Player"].astype(str)
+        df["Player Label"] = df["Player"].apply(short_player_label)
+        df = df.sort_values(["Lineup", "Spot"])
+
+        df["Traffic Opps / 100 PA"] = (
+                100.0 * pd.to_numeric(df["Pressure Events"], errors="coerce")
+                / pd.to_numeric(df["PA"], errors="coerce").clip(lower=1)
+        ).round(1)
+
+        df["Run Pressure / 100 PA"] = (
+                100.0 * pd.to_numeric(df["Pressure Points"], errors="coerce")
+                / pd.to_numeric(df["PA"], errors="coerce").clip(lower=1)
+        ).round(1)
+
+        plotted_lineups = sorted(df["Lineup"].dropna().unique().tolist())
+        if len(plotted_lineups) <= 1:
+            st.info(
+                "Only one lineup is currently selected for Signature Charts. "
+                "Use the saved-scenario selector above to include more saved lineups, "
+                "or save another scenario."
+            )
+
+        chart = (
+            alt.Chart(df)
+            .mark_line(point=True, interpolate="monotone")
+            .encode(
+                x=alt.X(
+                    "Player Label:N",
+                    title="Batting order",
+                    sort=None,
+                    axis=alt.Axis(labelAngle=-45, labelAlign="right"),
+                ),
+                y=alt.Y(
+                    "Pressure Score:Q",
+                    title="Pressure score",
+                    scale=alt.Scale(domain=[0, 100]),
+                ),
+                color=alt.Color("Lineup:N", title="Lineup"),
+                tooltip=[
+                    alt.Tooltip("Lineup:N"),
+                    alt.Tooltip("Spot:O", title="Batting spot"),
+                    alt.Tooltip("Player:N"),
+                    alt.Tooltip("Pressure Score:Q", format=".1f"),
+                    alt.Tooltip("Traffic Opps / 100 PA:Q", title="Traffic opps / 100 PA", format=".1f"),
+                    alt.Tooltip("Run Pressure / 100 PA:Q", title="Run pressure / 100 PA", format=".1f"),
+                    alt.Tooltip("PA:Q", title="Simulated PA", format=","),
+                ],
+            )
+            .properties(height=360)
+        )
+
+        st.altair_chart(chart, use_container_width=True)
+
+        st.caption(
+            "Compares how offensive pressure is distributed through each saved lineup."
+        )
+
+        st.caption(
+            "Tooltip rates are normalized per 100 simulated plate appearances. "
+            "Traffic opps = how often the hitter helped create or sustain baserunner pressure. "
+            "Run pressure = weighted offensive pressure contribution."
+        )
+
+
+def build_pitcher_stress_rows(lineup_profiles: list) -> list[dict]:
+    rows = []
+
+    for idx, profile in enumerate(lineup_profiles, start=1):
+        traits = getattr(profile, "effective_traits", getattr(profile, "base_traits", None))
+        if traits is None:
+            continue
+
+        contact = float(getattr(traits, "contact", 0.0))
+        discipline = float(getattr(traits, "plate_discipline", 0.0))
+        speed = float(getattr(traits, "speed", 0.0))
+        baserunning = float(getattr(traits, "baserunning", 0.0))
+        power = float(getattr(traits, "power", 0.0))
+
+        stress_score = (
+            0.30 * discipline
+            + 0.25 * contact
+            + 0.18 * speed
+            + 0.15 * baserunning
+            + 0.12 * power
+        )
+
+        rows.append(
+            {
+                "Spot": idx,
+                "Player": profile.name,
+                "Stress Score": round(max(0.0, min(100.0, stress_score)), 1),
+                "Contact": round(contact, 1),
+                "Discipline": round(discipline, 1),
+                "Speed": round(speed, 1),
+                "Baserunning": round(baserunning, 1),
+                "Power": round(power, 1),
+            }
+        )
+
+    return rows
+
+
+def pitcher_stress_coach_read(row: dict) -> str:
+    walk_rate = float(row.get("Walk Rate",0))
+    deep_count = float(row.get("Deep Count Rate",0))
+    damage = float(row.get("Rally Damage/100 PA",0))
+    extend = float(row.get("Rally Extensions/100 PA",0))
+    starts = float(row.get("Rally Starts/100 PA",0))
+    pressure = float(row.get("Pressure Score",0))
+
+    if walk_rate >= .14:
+        return "Works walks"
+
+    if deep_count >= .28:
+        return "Runs deep counts"
+
+    if damage >= 18:
+        return "Punishes traffic"
+
+    if extend >= 28:
+        return "Extends innings"
+
+    if starts >= 12:
+        return "Starts pressure"
+
+    if pressure >= 70:
+        return "Creates traffic"
+
+    if walk_rate >= .10:
+        return "Patient at-bat"
+
+    return "Support bat"
+
+
+def rally_ignition_coach_read(row: dict) -> str:
+    starts_per_100 = float(row.get("Rally Starts/100 PA", 0.0) or 0.0)
+    extensions_per_100 = float(row.get("Rally Extensions/100 PA", 0.0) or 0.0)
+    damage_per_100 = float(row.get("Rally Damage/100 PA", 0.0) or 0.0)
+
+    if starts_per_100 >= 15:
+        return "Leadoff-style spark"
+
+    if starts_per_100 >= 10 and extensions_per_100 >= 12:
+        return "Starts and sustains"
+
+    if damage_per_100 >= 20:
+        return "Cashes in traffic"
+
+    if damage_per_100 >= 14 and extensions_per_100 >= 20:
+        return "Keeps rally dangerous"
+
+    if extensions_per_100 >= 28:
+        return "Turns lineup over"
+
+    if extensions_per_100 >= 18:
+        return "Extends rallies"
+
+    if starts_per_100 >= 7:
+        return "Can spark innings"
+
+    return "Support bat"
+
+
+def select_signature_chart_rows(
+    compare_items: list,
+    *,
+    key: str,
+    label: str,
+) -> tuple[str, list[dict]]:
+    if not compare_items:
+        return "Lineup", []
+
+    names = []
+    item_by_name = {}
+
+    for item in compare_items:
+        if isinstance(item, dict):
+            name = str(item.get("display_name", "Lineup"))
+        else:
+            name = str(getattr(item, "display_name", "Lineup"))
+
+        if name not in item_by_name:
+            names.append(name)
+            item_by_name[name] = item
+
+    selected_name = st.selectbox(
+        label,
+        options=names,
+        index=0,
+        key=key,
+    )
+
+    selected_item = item_by_name[selected_name]
+    rows = build_signature_rows_from_telemetry(
+        get_simulation_telemetry_from_chart_item(selected_item),
+        lineup_name=selected_name,
+    )
+
+    return selected_name, rows
+
+
+def render_pitcher_stress_panel(
+    compare_items: list,
+    *,
+    selector_key: str = "pitcher_stress_signature_scenario",
+) -> None:
+    st.markdown("### Pitcher Stress Meter")
+    with st.expander("Pitcher Stress Meter", expanded=True):
+        _, signature_rows = select_signature_chart_rows(
+            compare_items,
+            key=selector_key,
+            label="Scenario",
+        )
+
+        st.caption(
+            "Shows how pitcher stress evolved in the simulated games. "
+            "This uses simulator events: estimated pitches, traffic, reaches, "
+            "and inning-extending plate appearances from thousands of simulated games."
+        )
+
+        rows = list(signature_rows)
+
+        if len(rows) < 2:
+            st.info("Add at least two active lineup players to build the Pitcher Stress Meter.")
+            return
+
+        df = pd.DataFrame(rows)
+
+        df["Spot"] = pd.to_numeric(df["Spot"], errors="coerce").astype(int)
+        df["Player"] = df["Player"].astype(str)
+        df["Player Label"] = df["Player"]
+        df = df.sort_values("Spot")
+
+        stress_index = float(df["Stress Score"].mean())
+        peak_row = df.sort_values("Stress Score", ascending=False).iloc[0]
+
+        # Find strongest 3-spot consecutive pressure cluster
+        spots = df.sort_values("Spot").reset_index(drop=True)
+
+        best_cluster_score = -1
+        best_cluster = None
+
+        for i in range(len(spots) - 2):
+            cluster = spots.iloc[i:i + 3]
+            score = cluster["Stress Score"].sum()
+
+            if score > best_cluster_score:
+                best_cluster_score = score
+                best_cluster = cluster
+
+        cluster_label = " → ".join(
+            str(int(x))
+            for x in best_cluster["Spot"].tolist()
+        )
+
+        metric_cols = st.columns(3)
+        metric_cols[0].metric("Lineup Pressure on Pitchers", f"{stress_index:.0f}/100")
+        metric_cols[1].metric("Toughest PA", str(peak_row["Player"]))
+        metric_cols[2].metric(
+            "Pressure Cluster",
+            cluster_label
+        )
+
+        if stress_index >= 70:
+            diagnosis = "This lineup should make pitchers work."
+        elif stress_index >= 55:
+            diagnosis = "This lineup creates moderate pitcher stress."
+        else:
+            diagnosis = "This lineup may need more traffic and inning-extenders."
+
+        st.success(f"Pitcher read: {diagnosis}")
+
+        chart = (
+            alt.Chart(df)
+            .mark_bar(cornerRadiusTopRight=6, cornerRadiusBottomRight=6)
+            .encode(
+                y=alt.Y(
+                    "Player:N",
+                    sort=alt.SortField(field="Spot", order="ascending"),
+                    title=None,
+                ),
+                x=alt.X(
+                    "Stress Score:Q",
+                    title="Pitcher stress score by batting order",
+                    scale=alt.Scale(domain=[0, 100]),
+                ),
+                color=alt.Color(
+                    "Stress Score:Q",
+                    legend=None,
+                    scale=alt.Scale(scheme="reds"),
+                ),
+                tooltip=[
+                    alt.Tooltip("Spot:O", title="Batting spot"),
+                    alt.Tooltip("Player:N"),
+                    alt.Tooltip("Stress Score:Q",
+                                title="Stress score",
+                                format=".1f"
+                                ),
+                    alt.Tooltip(
+                        "Walk Rate:Q",
+                        title="Walk rate",
+                        format=".1%"
+                    ),
+                    alt.Tooltip(
+                        "Deep Count Rate:Q",
+                        title="Long at-bat rate",
+                        format=".1%"
+                    ),
+                    alt.Tooltip(
+                        "Rally Extensions/100 PA:Q",
+                        title="Rallies extended /100 PA",
+                        format=".1f"
+                    ),
+                    alt.Tooltip(
+                        "Rally Damage/100 PA:Q",
+                        title="Traffic cashed in /100 PA",
+                        format=".1f"
+                    ),
+                ]
+            )
+            .properties(height=max(280, 32 * len(rows)))
+        )
+
+        st.altair_chart(chart, use_container_width=True)
+
+        st.info(
+            "How to read it:\n"
+            "• Walk Rate = how often this hitter forces free passes\n"
+            "• Long At-Bat Rate = share of plate appearances likely pushing deep counts\n"
+            "• Stress reflects traffic created, innings extended, and damage done under pressure\n"
+            "• Pressure Signatures are inferred from simulated behavior, not static traits"
+        )
+
+        pretty_rows = []
+        for row in rows:
+            role = pitcher_stress_coach_read(row)
+
+            pretty_rows.append(
+                {
+                    "Spot": row["Spot"],
+                    "Player": row["Player"],
+                    "Stress": row["Stress Score"],
+                    "Pressure Signature": role,
+                    "Walk Rate": f"{float(row.get('Walk Rate', 0.0)):.1%}",
+                    "Long At-Bat Rate": f"{float(row.get('Deep Count Rate', 0.0)):.1%}",
+                }
+            )
+
+        st.dataframe(pretty_rows, use_container_width=True, hide_index=True)
+
+
+def build_rally_ignition_rows(lineup_profiles: list) -> list[dict]:
+    rows = []
+
+    for idx, profile in enumerate(lineup_profiles, start=1):
+        traits = getattr(profile, "effective_traits", getattr(profile, "base_traits", None))
+        if traits is None:
+            continue
+
+        contact = float(getattr(traits, "contact", 0.0))
+        discipline = float(getattr(traits, "plate_discipline", 0.0))
+        speed = float(getattr(traits, "speed", 0.0))
+        baserunning = float(getattr(traits, "baserunning", 0.0))
+        power = float(getattr(traits, "power", 0.0))
+
+        ignition_score = (
+            0.32 * contact
+            + 0.26 * discipline
+            + 0.20 * speed
+            + 0.12 * baserunning
+            + 0.10 * power
+        )
+
+        extension_score = (
+            0.28 * contact
+            + 0.24 * discipline
+            + 0.22 * baserunning
+            + 0.16 * speed
+            + 0.10 * power
+        )
+
+        damage_score = (
+            0.38 * power
+            + 0.26 * contact
+            + 0.18 * discipline
+            + 0.10 * speed
+            + 0.08 * baserunning
+        )
+
+        rows.append(
+            {
+                "Spot": idx,
+                "Player": profile.name,
+                "Ignition": round(max(0.0, min(100.0, ignition_score)), 1),
+                "Extension": round(max(0.0, min(100.0, extension_score)), 1),
+                "Damage": round(max(0.0, min(100.0, damage_score)), 1),
+                "Contact": round(contact, 1),
+                "Discipline": round(discipline, 1),
+                "Speed": round(speed, 1),
+                "Baserunning": round(baserunning, 1),
+                "Power": round(power, 1),
+            }
+        )
+
+    return rows
+
+
+def render_rally_ignition_panel(
+    compare_items: list,
+    *,
+    selector_key: str = "rally_ignition_signature_scenario",
+) -> None:
+    st.markdown("### Rally Ignition Map")
+    with st.expander("Rally Ignition Map", expanded=True):
+        st.caption(
+            "Shows which hitters are most likely to start rallies, extend innings, or turn traffic into damage. "
+            "This helps identify spark plugs, rally extenders, and run-producing pressure spots."
+        )
+
+        _, signature_rows = select_signature_chart_rows(
+            compare_items,
+            key=selector_key,
+            label="Scenario",
+        )
+
+        rows = list(signature_rows)
+
+        if len(rows) < 2:
+            st.info("Add at least two active lineup players to build the Rally Ignition Map.")
+            return
+
+        df = pd.DataFrame(rows)
+
+        df["Spot"] = pd.to_numeric(df["Spot"], errors="coerce").astype(int)
+        df["Player"] = df["Player"].astype(str)
+        df["Player Label"] = df["Player"].apply(short_player_label)
+        df = df.sort_values("Spot")
+
+        spark_row = df.sort_values("Ignition", ascending=False).iloc[0]
+        extender_row = df.sort_values("Extension", ascending=False).iloc[0]
+        damage_row = df.sort_values("Damage", ascending=False).iloc[0]
+
+        metric_cols = st.columns(3)
+        metric_cols[0].metric("Best Rally Starter", str(spark_row["Player"]))
+        metric_cols[1].metric("Best Rally Extender", str(extender_row["Player"]))
+        metric_cols[2].metric("Best Damage Bat", str(damage_row["Player"]))
+
+        st.success(
+            "Coach read: use this chart to see who starts innings, who keeps rallies alive, "
+            "and who can cash in when traffic is on base."
+        )
+
+        long_df = df.melt(
+            id_vars=[
+                "Spot",
+                "Player",
+                "Player Label",
+                "Rally Starts/100 PA",
+                "Rally Extensions/100 PA",
+                "Rally Damage/100 PA",
+            ],
+            value_vars=["Ignition", "Extension", "Damage"],
+            var_name="Rally Role",
+            value_name="Score",
+        )
+
+        label_order = df.sort_values("Spot")["Player Label"].tolist()
+
+        chart = (
+            alt.Chart(long_df)
+            .mark_circle()
+            .encode(
+                x=alt.X(
+                    "Player Label:N",
+                    title="Batting order",
+                    sort=label_order,
+                    axis=alt.Axis(labelAngle=-45, labelAlign="right"),
+                ),
+                y=alt.Y(
+                    "Rally Role:N",
+                    title=None,
+                    sort=["Ignition", "Extension", "Damage"],
+                ),
+                size=alt.Size(
+                    "Score:Q",
+                    title="Role strength",
+                    scale=alt.Scale(range=[80, 1200]),
+                ),
+                color=alt.Color(
+                    "Score:Q",
+                    title="Score",
+                    scale=alt.Scale(scheme="goldred", domain=[0, 100]),
+                ),
+                tooltip=[
+                    alt.Tooltip("Spot:O", title="Batting spot"),
+                    alt.Tooltip("Player:N"),
+                    alt.Tooltip("Rally Role:N"),
+                    alt.Tooltip("Score:Q", format=".1f"),
+                    alt.Tooltip("Rally Starts/100 PA:Q", title="Ignites / 100 PA", format=".1f"),
+                    alt.Tooltip("Rally Extensions/100 PA:Q", title="Extends / 100 PA", format=".1f"),
+                    alt.Tooltip("Rally Damage/100 PA:Q", title="Damage / 100 PA", format=".1f"),
+                ],
+            )
+            .properties(height=300)
+        )
+
+        st.altair_chart(chart, use_container_width=True)
+
+        st.info(
+            "How to read it:\n"
+            "• Ignition = started rallies in the simulated games\n"
+            "• Extension = kept rally innings alive\n"
+            "• Damage = cashed in traffic with extra-base impact or run-producing plays"
+        )
+
+        pretty_rows = []
+        for row in rows:
+            coach_read = rally_ignition_coach_read(row)
+
+            pretty_rows.append(
+                {
+                    "Spot": row["Spot"],
+                    "Player": row["Player"],
+                    "Rally Signature": coach_read,
+                    "Rallies Started/100 PA": row.get("Rally Starts/100 PA", 0.0),
+                    "Rallies Extended/100 PA": row.get("Rally Extensions/100 PA", 0.0),
+                    "Traffic Cashed In/100 PA": row.get("Rally Damage/100 PA", 0.0),
+                }
+            )
+
+        st.dataframe(pretty_rows, use_container_width=True, hide_index=True)
+
 
 def team_entry_expander_token() -> int:
     return int(st.session_state.get("team_entry_expander_token", 0))
@@ -335,6 +1383,10 @@ def reset_team_scoped_ui_state() -> None:
     st.session_state.additional_gc_apply_summary = None
 
     st.session_state.show_team_loader = False
+
+    st.session_state.absent_player_shock = None
+    st.session_state.absent_player_shock_status = None
+    st.session_state.coach_lab_chart_compare_items = []
 
     clear_lineup_order_widget_state()
 
@@ -1618,30 +2670,179 @@ def render_coach_lab_comparison_charts(
     st.dataframe(bucket_rows, use_container_width=True, hide_index=True)
 
 
+def get_saved_rules_for_active_team() -> tuple[str, dict]:
+    try:
+        from core.session_manager import get_session_manager
+
+        manager = get_session_manager()
+        team = manager.get_workspace_team_for_session(
+            st.session_state.optimizer_session_id
+        )
+        return (
+            getattr(team, "rules_preset", "High School") or "High School",
+            dict(getattr(team, "rules_config", {}) or {}),
+        )
+    except Exception:
+        return "High School", {}
+
+
+def save_rules_for_active_team(
+    *,
+    rules_preset: str,
+    rules_config: dict,
+) -> None:
+    try:
+        from core.session_manager import get_session_manager
+
+        manager = get_session_manager()
+        team = manager.get_workspace_team_for_session(
+            st.session_state.optimizer_session_id
+        )
+        team.rules_preset = str(rules_preset)
+        team.rules_config = dict(rules_config)
+        manager.mark_workspace_dirty(st.session_state.optimizer_session_id)
+    except Exception:
+        pass
+
+
 def render_sidebar(session_state: SessionStateSchema) -> dict:
 
-    target_runs = 4.0   #keeps old code happy but unused as of 4/14/2026
+    saved_rules_preset, saved_rules_config = get_saved_rules_for_active_team()
+
+    st.sidebar.markdown("## 🎯 Scoring Goal")
+    target_runs = st.sidebar.slider(
+        "Goal Runs Per Game",
+        min_value=1.0,
+        max_value=12.0,
+        value=4.0,
+        step=1.0,
+        help="Used for charts that show the chance of scoring at least this many runs.",
+    )
+    st.sidebar.caption(f"Charts will show chance of scoring {target_runs:.1f}+ runs.")
+    st.sidebar.markdown("---")
 
     st.sidebar.markdown("## ⚾ Game Rules")
-    st.sidebar.caption("Set the game conditions.")
+    st.sidebar.caption("Choose a preset, then tweak if needed.")
 
-    innings_per_game = st.sidebar.slider("Innings / Game", 3, 9, 7)
+    preset_options = [
+        "Little League",
+        "Intermediate",
+        "High School",
+        "College",
+        "Manual",
+    ]
 
-    continuous_batting = st.sidebar.checkbox("Continuous Batting", value=False)
+    default_preset = (
+        saved_rules_preset
+        if saved_rules_preset in preset_options
+        else "High School"
+    )
 
-    use_inning_run_limit = st.sidebar.checkbox("Inning Run Limit", value=False)
+    rules_preset = st.sidebar.selectbox(
+        "Rules preset",
+        options=preset_options,
+        index=preset_options.index(default_preset),
+        key=f"rules_preset_{st.session_state.get('selected_team_id', 'no_team')}",
+    )
+
+    preset_changed = rules_preset != saved_rules_preset
+    saved_rules_config = dict(saved_rules_config or {})
+    if preset_changed:
+        saved_rules_config = {}
+
+    preset_defaults = {
+        "Little League": {
+            "innings": 6,
+            "diamond": "46/60",
+            "leadoffs": False,
+            "run_limit": False,
+            "continuous_batting": True,
+        },
+        "Intermediate": {
+            "innings": 7,
+            "diamond": "50/70",
+            "leadoffs": True,
+            "run_limit": False,
+            "continuous_batting": True,
+        },
+        "High School": {
+            "innings": 7,
+            "diamond": "60/90",
+            "leadoffs": True,
+            "run_limit": False,
+            "continuous_batting": False,
+        },
+        "College": {
+            "innings": 9,
+            "diamond": "60/90",
+            "leadoffs": True,
+            "run_limit": False,
+            "continuous_batting": False,
+        },
+        "Manual": {
+            "innings": int(saved_rules_config.get("innings", 7)),
+            "diamond": str(saved_rules_config.get("diamond_size", "60/90")),
+            "leadoffs": bool(saved_rules_config.get("leadoffs_allowed", True)),
+            "run_limit": bool(saved_rules_config.get("use_inning_run_limit", False)),
+            "continuous_batting": bool(saved_rules_config.get("continuous_batting", False)),
+        },
+    }
+
+    preset = preset_defaults[rules_preset]
+    if rules_preset == "Manual":
+        st.sidebar.info(
+            "Manual mode: use the controls below to create any custom rule set."
+        )
+    team_key = str(st.session_state.get("selected_team_id", "no_team"))
+    preset_key = f"{team_key}_{rules_preset.lower().replace(' ', '_').replace('/', '_')}"
+    saved_rules_config = dict(saved_rules_config or {})
+
+    if preset_changed:
+        saved_rules_config = {}
+
+    innings_per_game = st.sidebar.slider(
+        "Innings / Game",
+        3,
+        9,
+        int(saved_rules_config.get("innings", preset["innings"])),
+        key=f"innings_per_game_{preset_key}",
+    )
+
+    continuous_batting = st.sidebar.checkbox(
+        "Continuous Batting",
+        value=bool(saved_rules_config.get("continuous_batting", preset["continuous_batting"])),
+        key=f"continuous_batting_{preset_key}",
+    )
+
+    use_inning_run_limit = st.sidebar.checkbox(
+        "Inning Run Limit",
+        value=bool(saved_rules_config.get("use_inning_run_limit", preset["run_limit"])),
+        key=f"use_inning_run_limit_{preset_key}",
+    )
 
     inning_run_limit = None
     if use_inning_run_limit:
-        inning_run_limit = st.sidebar.number_input("Max runs per inning", min_value=1, max_value=20, value=5)
+        inning_run_limit = st.sidebar.number_input(
+            "Max runs per inning",
+            min_value=1,
+            max_value=20,
+            value=5,
+            key=f"inning_run_limit_{preset_key}",
+        )
 
+    diamond_options = ["46/60", "50/70", "60/90"]
     diamond_size = st.sidebar.selectbox(
         "Diamond Size",
-        ["46/60", "50/70", "60/90"],
-        index=2,
+        diamond_options,
+        index=diamond_options.index(str(saved_rules_config.get("diamond_size", preset["diamond"]))),
+        key=f"diamond_size_{preset_key}",
     )
 
-    leadoffs_allowed = st.sidebar.checkbox("Leadoffs Allowed", value=True)
+    leadoffs_allowed = st.sidebar.checkbox(
+        "Leadoffs Allowed",
+        value=bool(saved_rules_config.get("leadoffs_allowed", preset["leadoffs"])),
+        key=f"leadoffs_allowed_{preset_key}",
+    )
 
     st.sidebar.markdown("---")
 
@@ -1777,6 +2978,22 @@ def render_sidebar(session_state: SessionStateSchema) -> dict:
         "opponent_level": opponent_level_lookup[opponent_level_label],
     }
 
+    saved_team_rules_config = {
+        "innings": int(innings_per_game),
+        "diamond_size": str(diamond_size),
+        "leadoffs_allowed": bool(leadoffs_allowed),
+        "continuous_batting": bool(continuous_batting),
+        "use_inning_run_limit": bool(use_inning_run_limit),
+        "inning_run_limit": int(inning_run_limit) if use_inning_run_limit else None,
+    }
+
+    save_rules_for_active_team(
+        rules_preset=rules_preset,
+        rules_config=saved_team_rules_config,
+    )
+
+    saved_rules_preset = rules_preset
+
     return {
         "target_runs": float(target_runs),
         "strategy": strategy_label,
@@ -1807,6 +3024,12 @@ def inject_custom_styles() -> None:
             border-bottom: 2px solid rgba(250,250,250,0.12);
             padding-bottom: 0.35rem;
             margin-bottom: 1rem;
+        }
+        
+        div[data-testid="stButton"] button {
+            padding: 0.35rem 0.65rem !important;
+            min-height: 2.1rem !important;
+            white-space: nowrap !important;
         }
 
         button[data-baseweb="tab"] {
@@ -3411,6 +4634,7 @@ def build_chart_compare_set(
 def render_coach_lab_comparison_section(
     *,
     results: WorkflowResponseSchema | None,
+    run_settings: dict,
 ) -> None:
     saved_scenarios = get_saved_scenarios_for_ui()
     custom_eval_payload = st.session_state.get("coach_lab_last_custom_eval")
@@ -3443,6 +4667,8 @@ def render_coach_lab_comparison_section(
         include_live_custom=include_live_custom,
         include_random_and_worst=False,
     )
+
+    st.session_state.coach_lab_chart_compare_items = compare_items
 
     st.markdown("### Compare lineup scenarios")
     st.caption("Saved scenarios appear here. You can also include the current unsaved custom lineup.")
@@ -3486,128 +4712,158 @@ def render_coach_lab_comparison_section(
         st.caption("No comparison data yet.")
 
     # -----------------------------
-    # Survival curve
-    # -----------------------------
-    st.markdown("#### Chance of scoring at least X runs")
-
-    if enough_to_plot:
-        survival = build_survival_curve_chart_data(compare_items, max_runs=14)
-
-        survival_rows = []
-        for idx, x_val in enumerate(survival["x"]):
-            row = {"Runs": x_val}
-            for series in survival["series"]:
-                row[series["name"]] = series["y"][idx]
-            survival_rows.append(row)
-
-        survival_df = pd.DataFrame(survival_rows)
-        survival_long_df = survival_df.melt(
-            id_vars="Runs",
-            var_name="Lineup",
-            value_name="Probability",
-        )
-
-        survival_chart = (
-            alt.Chart(survival_long_df)
-            .mark_line(point=True)
-            .encode(
-                x=alt.X("Runs:Q", title="Runs"),
-                y=alt.Y(
-                    "Probability:Q",
-                    title="Chance of scoring at least X runs",
-                    axis=alt.Axis(format=".0%"),
-                    scale=alt.Scale(domain=[0, 1]),
-                ),
-                color=alt.Color("Lineup:N", title="Lineups"),
-                tooltip=[
-                    alt.Tooltip("Runs:Q"),
-                    alt.Tooltip("Lineup:N"),
-                    alt.Tooltip("Probability:Q", format=".1%"),
-                ],
-            )
-            .properties(height=360)
-        )
-
-        st.altair_chart(survival_chart, use_container_width=True)
-    else:
-        with st.container(border=True):
-            st.caption("Comparison plot will appear here.")
-            st.markdown(
-                "Create and save a scenario, or include the current unsaved custom order, to populate this plot."
-            )
-
-    # -----------------------------
     # Bucket comparison
     # -----------------------------
-    st.markdown("#### How often each lineup lands in these scoring ranges")
+    with st.expander("Bucket outcomes", expanded=True):
+        st.markdown("#### How often each lineup lands in these scoring ranges")
 
-    if enough_to_plot:
-        buckets = build_bucket_bar_chart_data(compare_items)
+        if enough_to_plot:
+            buckets = build_bucket_bar_chart_data(compare_items)
 
-        bucket_rows = []
-        for idx, bucket_label in enumerate(buckets["x"]):
-            row = {"Bucket": bucket_label}
-            for series in buckets["series"]:
-                row[series["name"]] = series["y"][idx]
-            bucket_rows.append(row)
+            bucket_rows = []
+            for idx, bucket_label in enumerate(buckets["x"]):
+                row = {"Bucket": bucket_label}
+                for series in buckets["series"]:
+                    row[series["name"]] = series["y"][idx]
+                bucket_rows.append(row)
 
-        bucket_df = pd.DataFrame(bucket_rows)
-        bucket_long_df = bucket_df.melt(
-            id_vars="Bucket",
-            var_name="Lineup",
-            value_name="Probability",
-        )
-
-        bucket_order = buckets["x"]
-
-        bucket_chart = (
-            alt.Chart(bucket_long_df)
-            .mark_bar()
-            .encode(
-                x=alt.X(
-                    "Bucket:N",
-                    title="Runs Scored",
-                    axis=alt.Axis(labelAngle=0),
-                    sort=bucket_order,
-                ),
-                xOffset=alt.XOffset("Lineup:N"),
-                y=alt.Y(
-                    "Probability:Q",
-                    title="How often this happens",
-                    axis=alt.Axis(format=".0%"),
-                ),
-                color=alt.Color("Lineup:N", title="Lineups"),
-                tooltip=[
-                    alt.Tooltip("Bucket:N"),
-                    alt.Tooltip("Lineup:N"),
-                    alt.Tooltip("Probability:Q", format=".1%"),
-                ],
-            )
-            .properties(height=360)
-        )
-
-        st.altair_chart(bucket_chart, use_container_width=True)
-
-        pretty_bucket_rows = []
-        for row in bucket_rows:
-            formatted = {"Bucket": row["Bucket"]}
-            for key, value in row.items():
-                if key == "Bucket":
-                    continue
-                formatted[key] = f"{value:.1%}"
-            pretty_bucket_rows.append(formatted)
-
-        st.markdown("#### Scoring range table")
-        st.dataframe(pretty_bucket_rows, use_container_width=True, hide_index=True)
-    else:
-        with st.container(border=True):
-            st.caption("Bucket comparison plot will appear here.")
-            st.markdown(
-                "Save a lineup scenario, or include the current unsaved custom order, to populate this chart."
+            bucket_df = pd.DataFrame(bucket_rows)
+            bucket_long_df = bucket_df.melt(
+                id_vars="Bucket",
+                var_name="Lineup",
+                value_name="Probability",
             )
 
-        st.markdown("#### Scoring range table")
-        st.caption("Scoring range table will appear once scenario data is available.")
+            bucket_order = buckets["x"]
+
+            bucket_chart = (
+                alt.Chart(bucket_long_df)
+                .mark_bar()
+                .encode(
+                    x=alt.X(
+                        "Bucket:N",
+                        title="Runs Scored",
+                        axis=alt.Axis(labelAngle=0),
+                        sort=bucket_order,
+                    ),
+                    xOffset=alt.XOffset("Lineup:N"),
+                    y=alt.Y(
+                        "Probability:Q",
+                        title="How often this happens",
+                        axis=alt.Axis(format=".0%"),
+                    ),
+                    color=alt.Color("Lineup:N", title="Lineups"),
+                    tooltip=[
+                        alt.Tooltip("Bucket:N"),
+                        alt.Tooltip("Lineup:N"),
+                        alt.Tooltip("Probability:Q", format=".1%"),
+                    ],
+                )
+                .properties(height=360)
+            )
+
+            st.altair_chart(bucket_chart, use_container_width=True)
+
+            pretty_bucket_rows = []
+            for row in bucket_rows:
+                formatted = {"Bucket": row["Bucket"]}
+                for key, value in row.items():
+                    if key == "Bucket":
+                        continue
+                    formatted[key] = f"{value:.1%}"
+                pretty_bucket_rows.append(formatted)
+
+            st.markdown("#### Scoring range table")
+            st.dataframe(pretty_bucket_rows, use_container_width=True, hide_index=True)
+        else:
+            with st.container(border=True):
+                st.caption("Bucket comparison plot will appear here.")
+                st.markdown(
+                    "Save a lineup scenario, or include the current unsaved custom order, to populate this chart."
+                )
+
+            st.markdown("#### Scoring range table")
+            st.caption("Scoring range table will appear once scenario data is available.")
+
+    # -----------------------------
+    # Survival curve
+    # -----------------------------
+    with st.expander("Chance of scoring at least X runs", expanded=True):
+        st.markdown("#### Chance of scoring at least X runs")
+
+        if enough_to_plot:
+            survival = build_survival_curve_chart_data(compare_items, max_runs=14)
+
+            survival_rows = []
+            for idx, x_val in enumerate(survival["x"]):
+                row = {"Runs": x_val}
+                for series in survival["series"]:
+                    row[series["name"]] = series["y"][idx]
+                survival_rows.append(row)
+
+            survival_df = pd.DataFrame(survival_rows)
+            survival_long_df = survival_df.melt(
+                id_vars="Runs",
+                var_name="Lineup",
+                value_name="Probability",
+            )
+
+            survival_chart = (
+                alt.Chart(survival_long_df)
+                .mark_line(point=True)
+                .encode(
+                    x=alt.X("Runs:Q", title="Runs"),
+                    y=alt.Y(
+                        "Probability:Q",
+                        title="Chance of scoring at least X runs",
+                        axis=alt.Axis(format=".0%"),
+                        scale=alt.Scale(domain=[0, 1]),
+                    ),
+                    color=alt.Color("Lineup:N", title="Lineups"),
+                    tooltip=[
+                        alt.Tooltip("Runs:Q"),
+                        alt.Tooltip("Lineup:N"),
+                        alt.Tooltip("Probability:Q", format=".1%"),
+                    ],
+                )
+                .properties(height=360)
+            )
+
+            st.altair_chart(survival_chart, use_container_width=True)
+        else:
+            with st.container(border=True):
+                st.caption("Comparison plot will appear here.")
+                st.markdown(
+                    "Create and save a scenario, or include the current unsaved custom order, to populate this plot."
+                )
+
+    st.markdown("---")
+    st.markdown("### Signature charts")
+
+    render_pressure_wave_comparison_panel(results=results)
+
+    compare_items = list(st.session_state.get("coach_lab_chart_compare_items", []))
+
+    if not compare_items:
+        saved_scenarios = get_saved_scenarios_for_ui()
+        custom_eval_payload = st.session_state.get("coach_lab_last_custom_eval")
+
+        compare_items = build_chart_compare_set(
+            results=results,
+            custom_eval_payload=custom_eval_payload,
+            saved_scenarios=saved_scenarios,
+            include_live_custom=bool(st.session_state.get("coach_lab_include_live_custom", True)),
+            include_random_and_worst=False,
+        )
+
+    st.markdown("---")
+    render_pitcher_stress_panel(compare_items)
+
+    st.markdown("---")
+    render_rally_ignition_panel(compare_items)
+
+    st.markdown("---")
+    render_absent_player_shock_panel(run_settings)
 
 
 def render_saved_scenarios_panel() -> None:
@@ -3844,64 +5100,16 @@ def render_coach_lab(
                 unsafe_allow_html=True,
             )
 
-        st.markdown("##### Coach decision workflows")
-        st.caption(
-            "Use this area for the most common decisions: who is hot/cold, pitcher matchps, who is absent tonight, where a new player fits, "
-            "and whether your own lineup grades better or worse than the optimized one."
-        )
-
-        workflow_cols = st.columns(5)
-
-        with workflow_cols[0]:
-            st.info(
-                "**Hot or cold bat**\n\n"
-                "Use nudges to reflect a player swinging hot or in a slump, then re-run to see if it changes the lineup."
-            )
-
-        with workflow_cols[1]:
-            st.info(
-                "**Pitcher matchup**\n\n"
-                "Adjust a hitter up or down based on the opposing pitcher, then re-optimize to test the impact."
-            )
-        with workflow_cols[2]:
-            st.info(
-                "**Absent player tonight**\n\n"
-                "Bench him, then re-run the sim or optimization to adjust your lineup."
-            )
-
-        with workflow_cols[3]:
-            st.info(
-                "**New player insertion**\n\n"
-                "Add a player, place him in the order, then simulate to see where he fits best."
-            )
-
-        with workflow_cols[4]:
-            st.info(
-                "**My lineup vs optimized**\n\n"
-                "Simulate your lineup, save it, then compare it to the optimized version in charts."
-            )
-
-        st.caption(
-            "How to use these controls right now: "
-            "Bench an absent player in the active lineup below. "
-            "Use Add player from archetype to test a new player. "
-            "Use player drop downs to apply nudges to bump qualities to adjust for hot/cold bat or pitcher matchups. "
-            "Reorder the lineup, click Simulate My Lineup, then click Save Scenario for Charts to compare it."
-        )
-
         st.divider()
 
-        lineup_action_col1, lineup_action_col2 = st.columns([1.45, 2.55])
-
-        with lineup_action_col1:
-            scenario_name = st.text_input(
-                "Scenario name",
-                value=f"Scenario {next_scenario_number}",
-                key="dashboard_scenario_name",
+        with st.container(border=True):
+            st.markdown("### Coach Action")
+            st.caption(
+                "Run lineup analysis first. Then name and save any lineup you want to compare in the charts."
             )
 
-        with lineup_action_col2:
             render_run_status_tile()
+
             action_cols = st.columns(3)
 
             with action_cols[0]:
@@ -3987,6 +5195,11 @@ def render_coach_lab(
                         )
                         st.rerun()
 
+                st.caption(
+                    "Searches thousands of lineup combinations\n"
+                    "to recommend your highest-scoring order."
+                )
+
             with action_cols[1]:
                 if st.button(
                         "Simulate My Lineup",
@@ -4027,6 +5240,21 @@ def render_coach_lab(
                                 innings_per_game=int(run_settings["rules_config"]["innings"]),
                             )
 
+                            telemetry = (
+                                custom_eval.get("custom_lineup", {})
+                                .get("simulation_telemetry", {})
+                                if isinstance(custom_eval, dict)
+                                else {}
+                            )
+
+                            if telemetry:
+                                summary["detail"] += (
+                                    f" Signature chart data captured from "
+                                    f"{int(telemetry.get('total_plate_appearances', 0)):,} simulated plate appearances, "
+                                    f"{int(telemetry.get('total_pressure_events', 0)):,} pressure events, "
+                                    f"and {int(telemetry.get('total_rally_innings', 0)):,} rally innings."
+                                )
+
                             set_run_status_tile(
                                 kind="success",
                                 title="Custom lineup simulation",
@@ -4043,7 +5271,75 @@ def render_coach_lab(
                         )
                         st.rerun()
 
+                st.caption(
+                    "Tests your current batting order with\n"
+                    "large-scale Monte Carlo game simulation."
+                )
+
             with action_cols[2]:
+                if st.button(
+                        "Run Lineup Shock Analysis",
+                        use_container_width=True,
+                        key="dashboard_generate_absent_player_shock",
+                ):
+                    clear_run_status_tile()
+
+                    set_run_status_tile(
+                        kind="info",
+                        title="Running Absent Player Analysis",
+                        detail=(
+                            "Running large-scale simulations for every player absence. "
+                            "This may take up to 2 minutes."
+                        ),
+                    )
+
+                    try:
+                        run_absent_player_shock_analysis(run_settings)
+
+                        set_run_status_tile(
+                            kind="success",
+                            title="Absent Player Analysis Ready",
+                            detail=(
+                                st.session_state.absent_player_shock_status
+                            ),
+                        )
+
+                        st.rerun()
+
+                    except Exception as exc:
+                        set_run_status_tile(
+                            kind="error",
+                            title="Absent Player Analysis",
+                            detail=f"Could not generate analysis: {exc}",
+                        )
+                        st.rerun()
+
+                    except Exception as exc:
+                        set_run_status_tile(
+                            kind="error",
+                            title="Absent Player Analysis",
+                            detail=f"Could not generate absent-player analysis: {exc}",
+                        )
+                        st.rerun()
+
+                st.caption(
+                    "Measures how much offense drops if a starter\n"
+                    "is absent using large-scale simulation."
+                )
+
+            st.markdown("---")
+            save_cols = st.columns([2, 1])
+
+            with save_cols[0]:
+                scenario_name = st.text_input(
+                    "Scenario name",
+                    value=f"Scenario {next_scenario_number}",
+                    key="dashboard_scenario_name",
+                )
+
+            with save_cols[1]:
+                st.markdown("<div style='height: 1.8rem;'></div>", unsafe_allow_html=True)
+
                 if st.button(
                         "Save Scenario for Charts",
                         use_container_width=True,
@@ -4074,9 +5370,6 @@ def render_coach_lab(
                         if cached_lineup == latest_lineup_names and cached_eval is not None:
                             custom_eval = cached_eval
 
-                            # set_custom_lineup(...) above cleared the backend's
-                            # custom_lineup_result, so restore it from the cached UI
-                            # payload before saving.
                             set_custom_lineup_result_payload(
                                 st.session_state.optimizer_session_id,
                                 result_payload=custom_eval,
@@ -4099,9 +5392,6 @@ def render_coach_lab(
                             name=saved_name,
                         )
 
-                        # The current live eval is no longer "unsaved" once it has
-                        # been saved as a scenario. Rename it to match, then hide
-                        # the live trace by default so charts only show the saved item.
                         live_eval = st.session_state.get("coach_lab_last_custom_eval")
                         if isinstance(live_eval, dict):
                             custom_block = live_eval.get("custom_lineup")
@@ -4124,6 +5414,10 @@ def render_coach_lab(
                         st.rerun()
                     except Exception as exc:
                         st.error(f"Could not save scenario: {exc}")
+
+
+
+
 
         workspace_mode = st.session_state.get("coach_lab_workspace_mode")
 
@@ -4310,7 +5604,10 @@ def render_coach_lab(
     )
 
     st.markdown("")
-    render_coach_lab_comparison_section(results=baseline_results)
+    render_coach_lab_comparison_section(
+        results=baseline_results,
+        run_settings=run_settings,
+    )
 
     saved_scenario_msgs = st.session_state.get("coach_lab_saved_scenario_messages", [])
     if saved_scenario_msgs:
@@ -4348,7 +5645,38 @@ def render_coach_footer(results: WorkflowResponseSchema) -> None:
 
 
 def render_results(results: WorkflowResponseSchema | None) -> None:
-    st.markdown("## Coach Lab")
+    st.markdown(
+        """
+    <div style="
+    padding:18px 22px;
+    border-radius:18px;
+    border:1px solid rgba(120,160,255,.28);
+    background: linear-gradient(
+    180deg,
+    rgba(56,109,255,.12),
+    rgba(56,109,255,.04)
+    );
+    margin-bottom:1rem;
+    ">
+    <div style="
+    font-size:2rem;
+    font-weight:800;
+    letter-spacing:.01em;
+    margin-bottom:.35rem;
+    ">
+    ⚾ Coach Lab
+    </div>
+
+    <div style="
+    font-size:1.02rem;
+    opacity:.88;
+    ">
+    Build, test, optimize, and compare batting orders using simulation.
+    </div>
+    </div>
+    """,
+        unsafe_allow_html=True,
+    )
 
     render_coach_lab(results, st.session_state.run_settings_cache)
 

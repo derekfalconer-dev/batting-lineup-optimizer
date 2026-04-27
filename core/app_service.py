@@ -6,7 +6,7 @@ from typing import Any, Sequence
 
 import random
 
-from core.evaluator import evaluate_lineup
+from core.evaluator import evaluate_lineup_with_telemetry
 from core.models import RulesConfig, compile_rules_context
 from core.optimizer import find_best_lineups
 from core.visualization import (
@@ -513,12 +513,13 @@ def _evaluate_named_lineup(
     seed: int,
     n_games: int = 3000,
 ) -> dict[str, Any]:
-    result = evaluate_lineup(
+    result, telemetry = evaluate_lineup_with_telemetry(
         lineup=lineup,
         rules=rules,
         n_games=n_games,
         target_runs=target_runs,
         seed=seed,
+        display_name=display_name,
     )
     return {
         "display_name": display_name,
@@ -534,6 +535,7 @@ def _evaluate_named_lineup(
         "n_games": result.n_games,
         "target_runs": target_runs,
         "runs_scored_distribution": result.runs_scored_distribution,
+        "simulation_telemetry": telemetry,
     }
 
 

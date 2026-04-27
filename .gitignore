@@ -10,4 +10,6 @@ output/
 data/uploads/
 data/teams/
 data/scenarios/
-data/processed/
+data/processed/.aider*
+.aider*
+.aider.tags.cache.v4/
