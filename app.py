@@ -106,6 +106,55 @@ MANUAL_OVERRIDE_TOOLTIP_BY_FIELD = {
     "sacrifice_ability": "How capable the player is at productive outs, bunts, and move-the-runner style execution. Higher values help small-ball situations.",
 }
 
+SAMPLE_TEAM_NAME = "Sample Team"
+SAMPLE_GC_CSV_CANDIDATES = [
+    Path("assets/Generic GC Stats.csv"),
+]
+
+def find_sample_gc_csv_path() -> Path | None:
+    for path in SAMPLE_GC_CSV_CANDIDATES:
+        if path.exists():
+            return path
+    return None
+
+
+def seed_sample_team_for_new_user(
+    *,
+    session_id: str,
+    team_id: str,
+    user_id: str,
+    user_email: str,
+) -> bool:
+    sample_csv = find_sample_gc_csv_path()
+    if sample_csv is None:
+        return False
+
+    try:
+        configure_gc_session(
+            session_id,
+            csv_path=sample_csv,
+            adjustments_path=None,
+            data_source="gc",
+        )
+        initialize_editable_roster(session_id)
+
+        from core.analytics import safe_log_event
+
+        safe_log_event(
+            event_type="sample_team_seeded",
+            user_id=user_id,
+            user_email=user_email,
+            session_id=session_id,
+            team_id=team_id,
+            metadata={
+                "team_name": SAMPLE_TEAM_NAME,
+                "source_file": str(sample_csv),
+            },
+        )
+        return True
+    except Exception:
+        return False
+
 
 # =============================================================================
 # Session + file helpers
@@ -1520,9 +1569,16 @@ def ensure_selected_team() -> None:
     if not team_summaries:
         team = manager.create_team(
             owner_user_id=current_user.user_id,
-            team_name="Untitled Team",
+            team_name=SAMPLE_TEAM_NAME,
         )
         manager.attach_session_to_team(session_obj.session_id, team_id=team.team_id)
+
+        sample_seeded = seed_sample_team_for_new_user(
+            session_id=session_obj.session_id,
+            team_id=team.team_id,
+            user_id=current_user.user_id,
+            user_email=current_user.email,
+        )
 
         from core.analytics import safe_log_event
 
@@ -1533,8 +1589,9 @@ def ensure_selected_team() -> None:
             session_id=session_obj.session_id,
             team_id=team.team_id,
             metadata={
-                "team_name": "Untitled Team",
-                "creation_mode": "bootstrap_default",
+                "team_name": SAMPLE_TEAM_NAME,
+                "creation_mode": "bootstrap_sample",
+                "sample_seeded": sample_seeded,
             },
         )
 
@@ -1545,13 +1602,16 @@ def ensure_selected_team() -> None:
             session_id=session_obj.session_id,
             team_id=team.team_id,
             metadata={
-                "team_name": "Untitled Team",
-                "load_reason": "bootstrap_default",
+                "team_name": SAMPLE_TEAM_NAME,
+                "load_reason": "bootstrap_sample",
+                "sample_seeded": sample_seeded,
             },
         )
 
         st.session_state.selected_team_id = team.team_id
         st.session_state.sync_team_selector_dropdown = True
+        st.session_state.show_team_loader = False
+        st.session_state.active_results_tab = "Coach Lab"
         return
 
     valid_team_ids = {team["team_id"] for team in team_summaries}
@@ -2304,7 +2364,7 @@ def render_how_to_use_panel() -> None:
         with col1:
             st.markdown("**1. Adjust for a hot or cold bat**")
             st.caption(
-                "Use the nudge sliders to reflect a player who’s hot or in a slump, then re-run the optimizer to see if it actually changes where they should hit."
+                "Use the nudge sliders to reflect a player who’s hot or in a slump, then re-run the optimizer to see if it actually changes where player should hit."
             )
 
         with col2:
@@ -2323,7 +2383,7 @@ def render_how_to_use_panel() -> None:
         with col4:
             st.markdown("**4. Try a new player**")
             st.caption(
-                "Add a player from an archetype, place him in the order, and simulate how he changes the lineup."
+                "Add a player from an archetype, place the player in the order, and simulate how the player changes the lineup."
             )
 
         with col5:
@@ -6014,7 +6074,7 @@ def format_archetype_label(archetype: str) -> str:
         "speedster": "Speedster",
         "table_setter": "Table Setter",
         "balanced": "Balanced",
-        "weak_hitter": "Weak Hitter",
+        "weak_hitter": "Developing Bat",
         "unknown": "Unknown",
     }
     return mapping.get(archetype, archetype.replace("_", " ").title())
