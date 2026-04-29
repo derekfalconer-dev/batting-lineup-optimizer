@@ -1467,7 +1467,7 @@ def render_login_gate() -> None:
             use_container_width=True,
             key="login_with_google_button",
         ):
-            st.login()
+            st.login(provider="google")
 
 
 def require_authenticated_user() -> None:
