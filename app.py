@@ -529,43 +529,6 @@ def render_absent_player_shock_panel(run_settings: dict) -> None:
         )
 
 
-def build_pressure_wave_rows(lineup_profiles: list) -> list[dict]:
-    rows = []
-
-    for idx, profile in enumerate(lineup_profiles, start=1):
-        traits = getattr(profile, "effective_traits", getattr(profile, "base_traits", None))
-        if traits is None:
-            continue
-
-        contact = float(getattr(traits, "contact", 0.0))
-        discipline = float(getattr(traits, "plate_discipline", 0.0))
-        speed = float(getattr(traits, "speed", 0.0))
-        power = float(getattr(traits, "power", 0.0))
-        baserunning = float(getattr(traits, "baserunning", 0.0))
-
-        pressure_score = (
-            0.34 * contact
-            + 0.24 * discipline
-            + 0.18 * speed
-            + 0.14 * power
-            + 0.10 * baserunning
-        )
-
-        rows.append(
-            {
-                "Spot": idx,
-                "Player": profile.name,
-                "Pressure Score": round(max(0.0, min(100.0, pressure_score)), 1),
-                "Contact": round(contact, 1),
-                "Discipline": round(discipline, 1),
-                "Speed": round(speed, 1),
-                "Power": round(power, 1),
-            }
-        )
-
-    return rows
-
-
 def short_player_label(name: str) -> str:
     """
     Compact chart label for crowded x-axes.
@@ -615,117 +578,6 @@ def build_signature_rows_from_telemetry(
 
     rows.sort(key=lambda r: int(r.get("Spot", 0)))
     return rows
-
-
-def render_pressure_wave_panel(lineup_profiles: list) -> None:
-    st.markdown("### Pressure Wave")
-    with st.expander("Lineup Pressure Wave", expanded=False):
-        st.caption(
-            "Pressure Wave shows where your lineup applies sustained offensive pressure. "
-            "It combines contact, on-base skill, speed, power, and baserunning to estimate "
-            "which batting spots can stress pitchers, force defensive mistakes, and keep innings alive."
-        )
-
-        rows = build_pressure_wave_rows(lineup_profiles)
-
-        if len(rows) < 2:
-            st.info("Add at least two active lineup players to build the Pressure Wave.")
-            return
-
-        df = pd.DataFrame(rows)
-
-        df["Spot"] = pd.to_numeric(df["Spot"], errors="coerce").astype(int)
-        df["Player"] = df["Player"].astype(str)
-        df["Player Label"] = df["Player"].apply(short_player_label)
-        df = df.sort_values(["Lineup", "Spot"])
-
-        avg_pressure = float(df["Pressure Score"].mean())
-        peak_row = df.sort_values("Pressure Score", ascending=False).iloc[0]
-
-        metric_cols = st.columns(3)
-        metric_cols[0].metric("Pressure Index", f"{avg_pressure:.0f}/100")
-        metric_cols[1].metric("Biggest Pressure Spot", f"#{int(peak_row['Spot'])}")
-        metric_cols[2].metric("Primary Rally Igniter", str(peak_row["Player"]))
-
-        pressure_std = float(df["Pressure Score"].std())
-
-        if pressure_std < 8:
-            diagnosis = "Very balanced lineup pressure."
-        elif pressure_std < 14:
-            diagnosis = "Moderate peaks with a few pressure pockets."
-        else:
-            diagnosis = "High-variance lineup with big peaks and possible dead zones."
-
-        st.success(f"Wave diagnosis: {diagnosis}")
-
-        base = alt.Chart(df).encode(
-            x=alt.X(
-                "Player Label:N",
-                title="Batting order",
-                sort=None,
-                axis=alt.Axis(labelAngle=-45, labelAlign="right"),
-            ),
-            y=alt.Y(
-                "Pressure Score:Q",
-                title="Pressure on pitcher / defense",
-                scale=alt.Scale(domain=[0, 100]),
-            ),
-            tooltip=[
-                alt.Tooltip("Spot:O", title="Batting spot"),
-                alt.Tooltip("Player:N"),
-                alt.Tooltip("Pressure Score:Q", title="Pressure score", format=".1f"),
-                alt.Tooltip("Contact:Q", format=".1f"),
-                alt.Tooltip("Discipline:Q", format=".1f"),
-                alt.Tooltip("Speed:Q", format=".1f"),
-                alt.Tooltip("Power:Q", format=".1f"),
-                alt.Tooltip("Estimated Pitches/PA:Q", title="Estimated pitches/PA", format=".2f"),
-                alt.Tooltip("Walk Rate:Q", title="Walk rate", format=".1%"),
-                alt.Tooltip("Deep Count Rate:Q", title="Deep-count PA rate", format=".1%"),
-            ],
-        )
-
-        wave = base.mark_area(
-            opacity=0.35,
-            interpolate="monotone",
-        )
-
-        line = base.mark_line(
-            point=True,
-            interpolate="monotone",
-        )
-
-        chart = (wave + line).properties(height=340)
-
-        st.altair_chart(chart, use_container_width=True)
-
-        st.info(
-            "How to read it:\n"
-            "• Peaks = pressure points where rallies often start or grow\n"
-            "• Valleys = possible lineup dead zones where innings may stall\n"
-            "• Back-to-back peaks can create sustained pressure on pitch counts and defense\n"
-            "• A smoother wave often means deeper, tougher lineups"
-        )
-
-        st.caption(
-            "Coach read: Look for dead zones you may want to break up, and for clusters of pressure that can wear down pitchers. "
-            "In youth baseball, sustained pressure often creates walks, errors, and big innings."
-        )
-
-        pretty_rows = [
-            {
-                "Spot": row["Spot"],
-                "Player": row["Player"],
-                "Pressure": row["Pressure Score"],
-                "Why It Matters": (
-                    "Can stress the defense"
-                    if row["Pressure Score"] >= 70
-                    else "Solid lineup spot"
-                    if row["Pressure Score"] >= 55
-                    else "Possible dead zone"
-                ),
-            }
-            for row in rows
-        ]
 
 
 def render_pressure_wave_comparison_panel(
@@ -839,44 +691,6 @@ def render_pressure_wave_comparison_panel(
             "Traffic opps = how often the hitter helped create or sustain baserunner pressure. "
             "Run pressure = weighted offensive pressure contribution."
         )
-
-
-def build_pitcher_stress_rows(lineup_profiles: list) -> list[dict]:
-    rows = []
-
-    for idx, profile in enumerate(lineup_profiles, start=1):
-        traits = getattr(profile, "effective_traits", getattr(profile, "base_traits", None))
-        if traits is None:
-            continue
-
-        contact = float(getattr(traits, "contact", 0.0))
-        discipline = float(getattr(traits, "plate_discipline", 0.0))
-        speed = float(getattr(traits, "speed", 0.0))
-        baserunning = float(getattr(traits, "baserunning", 0.0))
-        power = float(getattr(traits, "power", 0.0))
-
-        stress_score = (
-            0.30 * discipline
-            + 0.25 * contact
-            + 0.18 * speed
-            + 0.15 * baserunning
-            + 0.12 * power
-        )
-
-        rows.append(
-            {
-                "Spot": idx,
-                "Player": profile.name,
-                "Stress Score": round(max(0.0, min(100.0, stress_score)), 1),
-                "Contact": round(contact, 1),
-                "Discipline": round(discipline, 1),
-                "Speed": round(speed, 1),
-                "Baserunning": round(baserunning, 1),
-                "Power": round(power, 1),
-            }
-        )
-
-    return rows
 
 
 def pitcher_stress_coach_read(row: dict) -> str:
@@ -1126,62 +940,6 @@ def render_pitcher_stress_panel(
             )
 
         st.dataframe(pretty_rows, use_container_width=True, hide_index=True)
-
-
-def build_rally_ignition_rows(lineup_profiles: list) -> list[dict]:
-    rows = []
-
-    for idx, profile in enumerate(lineup_profiles, start=1):
-        traits = getattr(profile, "effective_traits", getattr(profile, "base_traits", None))
-        if traits is None:
-            continue
-
-        contact = float(getattr(traits, "contact", 0.0))
-        discipline = float(getattr(traits, "plate_discipline", 0.0))
-        speed = float(getattr(traits, "speed", 0.0))
-        baserunning = float(getattr(traits, "baserunning", 0.0))
-        power = float(getattr(traits, "power", 0.0))
-
-        ignition_score = (
-            0.32 * contact
-            + 0.26 * discipline
-            + 0.20 * speed
-            + 0.12 * baserunning
-            + 0.10 * power
-        )
-
-        extension_score = (
-            0.28 * contact
-            + 0.24 * discipline
-            + 0.22 * baserunning
-            + 0.16 * speed
-            + 0.10 * power
-        )
-
-        damage_score = (
-            0.38 * power
-            + 0.26 * contact
-            + 0.18 * discipline
-            + 0.10 * speed
-            + 0.08 * baserunning
-        )
-
-        rows.append(
-            {
-                "Spot": idx,
-                "Player": profile.name,
-                "Ignition": round(max(0.0, min(100.0, ignition_score)), 1),
-                "Extension": round(max(0.0, min(100.0, extension_score)), 1),
-                "Damage": round(max(0.0, min(100.0, damage_score)), 1),
-                "Contact": round(contact, 1),
-                "Discipline": round(discipline, 1),
-                "Speed": round(speed, 1),
-                "Baserunning": round(baserunning, 1),
-                "Power": round(power, 1),
-            }
-        )
-
-    return rows
 
 
 def render_rally_ignition_panel(
