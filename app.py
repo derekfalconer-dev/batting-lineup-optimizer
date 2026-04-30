@@ -630,7 +630,6 @@ def render_pressure_wave_comparison_panel(
 
         df["Spot"] = pd.to_numeric(df["Spot"], errors="coerce").astype(int)
         df["Player"] = df["Player"].astype(str)
-        df["Player Label"] = df["Player"].apply(short_player_label)
         df = df.sort_values(["Lineup", "Spot"])
 
         df["Traffic Opps / 100 PA"] = (
@@ -656,10 +655,9 @@ def render_pressure_wave_comparison_panel(
             .mark_line(point=True, interpolate="monotone")
             .encode(
                 x=alt.X(
-                    "Player Label:N",
-                    title="Batting order",
-                    sort=None,
-                    axis=alt.Axis(labelAngle=-45, labelAlign="right"),
+                    "Spot:O",
+                    title="Batting spot",
+                    sort="ascending",
                 ),
                 y=alt.Y(
                     "Pressure Score:Q",
@@ -694,62 +692,74 @@ def render_pressure_wave_comparison_panel(
 
 
 def pitcher_stress_coach_read(row: dict) -> str:
-    walk_rate = float(row.get("Walk Rate",0))
-    deep_count = float(row.get("Deep Count Rate",0))
-    damage = float(row.get("Rally Damage/100 PA",0))
-    extend = float(row.get("Rally Extensions/100 PA",0))
-    starts = float(row.get("Rally Starts/100 PA",0))
-    pressure = float(row.get("Pressure Score",0))
+    stress_pct = float(row.get("Stress Percentile", 0.0) or 0.0)
+    walk_pct = float(row.get("Walk Percentile", 0.0) or 0.0)
+    deep_count_pct = float(row.get("Deep Count Percentile", 0.0) or 0.0)
+    extension_pct = float(row.get("Extension Percentile", 0.0) or 0.0)
+    pressure_pct = float(row.get("Pressure Percentile", 0.0) or 0.0)
 
-    if walk_rate >= .14:
-        return "Works walks"
+    scores = {
+        "stress": stress_pct,
+        "walk": walk_pct,
+        "deep_count": deep_count_pct,
+        "pressure": pressure_pct,
+        "extension": extension_pct,
+    }
 
-    if deep_count >= .28:
-        return "Runs deep counts"
+    primary = max(scores, key=scores.get)
+    top_score = scores[primary]
 
-    if damage >= 18:
-        return "Punishes traffic"
+    if top_score < 60:
+        return "Support bat"
 
-    if extend >= 28:
-        return "Extends innings"
+    if primary == "stress":
+        return "Strong stress creator" if stress_pct >= 87 else "Creates pitcher stress"
 
-    if starts >= 12:
-        return "Starts pressure"
+    if primary == "walk":
+        return "Strong walk pressure" if walk_pct >= 87 else "Builds walk pressure"
 
-    if pressure >= 70:
-        return "Creates traffic"
+    if primary == "deep_count":
+        return "Strong count grinder" if deep_count_pct >= 87 else "Works deep counts"
 
-    if walk_rate >= .10:
-        return "Patient at-bat"
+    if primary == "pressure":
+        return "Strong pressure builder" if pressure_pct >= 87 else "Builds scoring pressure"
+
+    if primary == "extension":
+        return "Strong inning extender" if extension_pct >= 87 else "Extends innings"
 
     return "Support bat"
 
 
 def rally_ignition_coach_read(row: dict) -> str:
-    starts_per_100 = float(row.get("Rally Starts/100 PA", 0.0) or 0.0)
-    extensions_per_100 = float(row.get("Rally Extensions/100 PA", 0.0) or 0.0)
-    damage_per_100 = float(row.get("Rally Damage/100 PA", 0.0) or 0.0)
+    run_pct = float(row.get("Run Producer Percentile", 0.0) or 0.0)
+    pressure_pct = float(row.get("Pressure Percentile", 0.0) or 0.0)
+    extension_pct = float(row.get("Extension Percentile", 0.0) or 0.0)
+    ignition_pct = float(row.get("Ignition Percentile", 0.0) or 0.0)
 
-    if starts_per_100 >= 15:
-        return "Leadoff-style spark"
+    scores = {
+        "run": run_pct,
+        "pressure": pressure_pct,
+        "extension": extension_pct,
+        "ignition": ignition_pct,
+    }
 
-    if starts_per_100 >= 10 and extensions_per_100 >= 12:
-        return "Starts and sustains"
+    primary = max(scores, key=scores.get)
+    top_score = scores[primary]
 
-    if damage_per_100 >= 20:
-        return "Cashes in traffic"
+    if top_score < 60:
+        return "Support bat"
 
-    if damage_per_100 >= 14 and extensions_per_100 >= 20:
-        return "Keeps rally dangerous"
+    if primary == "run":
+        return "Strong run converter" if run_pct >= 87 else "Run converter"
 
-    if extensions_per_100 >= 28:
-        return "Turns lineup over"
+    if primary == "pressure":
+        return "Strong pressure builder" if pressure_pct >= 87 else "Builds scoring pressure"
 
-    if extensions_per_100 >= 18:
-        return "Extends rallies"
+    if primary == "extension":
+        return "Strong rally extender" if extension_pct >= 87 else "Extends rallies"
 
-    if starts_per_100 >= 7:
-        return "Can spark innings"
+    if primary == "ignition":
+        return "Strong rally starter" if ignition_pct >= 87 else "Can start rallies"
 
     return "Support bat"
 
@@ -799,10 +809,27 @@ def render_pitcher_stress_panel(
 ) -> None:
     st.markdown("### Pitcher Stress Meter")
     with st.expander("Pitcher Stress Meter", expanded=True):
-        _, signature_rows = select_signature_chart_rows(
+        selected_name, signature_rows = select_signature_chart_rows(
             compare_items,
             key=selector_key,
             label="Scenario",
+        )
+
+        st.markdown(
+            f"""
+            <div style="
+                margin: 0.35rem 0 1rem 0;
+                padding: 0.8rem 1rem;
+                border-radius: 12px;
+                border: 1px solid rgba(120,160,255,.35);
+                background: rgba(80,130,255,.12);
+                font-size: 1.05rem;
+                font-weight: 800;
+            ">
+                Viewing scenario: {selected_name}
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
 
         st.caption(
@@ -823,6 +850,13 @@ def render_pitcher_stress_panel(
         df["Player"] = df["Player"].astype(str)
         df["Player Label"] = df["Player"]
         df = df.sort_values("Spot")
+
+        df["Stress Percentile"] = df["Stress Score"].rank(pct=True) * 100
+        df["Walk Percentile"] = df["Walk Rate"].rank(pct=True) * 100
+        df["Deep Count Percentile"] = df["Deep Count Rate"].rank(pct=True) * 100
+        df["Extension Percentile"] = df["Rally Extensions/100 PA"].rank(pct=True) * 100
+        df["Pressure Percentile"] = df["Rally Damage/100 PA"].rank(pct=True) * 100
+
 
         stress_index = float(df["Stress Score"].mean())
         peak_row = df.sort_values("Stress Score", ascending=False).iloc[0]
@@ -846,12 +880,44 @@ def render_pitcher_stress_panel(
             for x in best_cluster["Spot"].tolist()
         )
 
+        pressure_score = f"{stress_index:.0f}"
+        toughest_player = str(peak_row["Player"])
+        cluster_text = cluster_label
+
+
         metric_cols = st.columns(3)
-        metric_cols[0].metric("Lineup Pressure on Pitchers", f"{stress_index:.0f}/100")
-        metric_cols[1].metric("Toughest PA", str(peak_row["Player"]))
-        metric_cols[2].metric(
-            "Pressure Cluster",
-            cluster_label
+
+        # Column 1 — Overall pressure score
+        metric_cols[0].markdown(
+            f"""
+            <div style="line-height:1.2;">
+                <div style="font-size:0.85rem; opacity:0.75;">Lineup Pressure on Pitchers</div>
+                <div style="font-size:1.6rem; font-weight:800;">{pressure_score}/100</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        # Column 2 — Toughest PA (player)
+        metric_cols[1].markdown(
+            f"""
+            <div style="line-height:1.2;">
+                <div style="font-size:0.85rem; opacity:0.75;">Toughest PA</div>
+                <div style="font-size:1.2rem; font-weight:700;">{toughest_player}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        # Column 3 — Pressure cluster
+        metric_cols[2].markdown(
+            f"""
+            <div style="line-height:1.2;">
+                <div style="font-size:0.85rem; opacity:0.75;">Pressure Cluster</div>
+                <div style="font-size:1.3rem; font-weight:700;">{cluster_text}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
 
         if stress_index >= 70:
@@ -918,14 +984,15 @@ def render_pitcher_stress_panel(
 
         st.info(
             "How to read it:\n"
-            "• Walk Rate = how often this hitter forces free passes\n"
-            "• Long At-Bat Rate = share of plate appearances likely pushing deep counts\n"
-            "• Stress reflects traffic created, innings extended, and damage done under pressure\n"
-            "• Pressure Signatures are inferred from simulated behavior, not static traits"
+            "• These roles are relative to this team and this simulated lineup\n"
+            "• They do not claim a player is elite versus the league, age group, or All-Star pool\n"
+            "• Walk pressure = who most often forces free passes on this team\n"
+            "• Long at-bat pressure = who most often pushes deeper counts on this team\n"
+            "• Stress combines traffic created, innings extended, and pressure added"
         )
 
         pretty_rows = []
-        for row in rows:
+        for row in df.to_dict("records"):
             role = pitcher_stress_coach_read(row)
 
             pretty_rows.append(
@@ -936,6 +1003,9 @@ def render_pitcher_stress_panel(
                     "Pressure Signature": role,
                     "Walk Rate": f"{float(row.get('Walk Rate', 0.0)):.1%}",
                     "Long At-Bat Rate": f"{float(row.get('Deep Count Rate', 0.0)):.1%}",
+                    "Stress Percentile": f"{float(row.get('Stress Percentile', 0.0)):.0f}",
+                    "Walk Percentile": f"{float(row.get('Walk Percentile', 0.0)):.0f}",
+                    "Deep Count Percentile": f"{float(row.get('Deep Count Percentile', 0.0)):.0f}",
                 }
             )
 
@@ -954,10 +1024,27 @@ def render_rally_ignition_panel(
             "This helps identify spark plugs, rally extenders, and run-producing pressure spots."
         )
 
-        _, signature_rows = select_signature_chart_rows(
+        selected_name, signature_rows = select_signature_chart_rows(
             compare_items,
             key=selector_key,
             label="Scenario",
+        )
+
+        st.markdown(
+            f"""
+            <div style="
+                margin: 0.35rem 0 1rem 0;
+                padding: 0.8rem 1rem;
+                border-radius: 12px;
+                border: 1px solid rgba(120,160,255,.35);
+                background: rgba(80,130,255,.12);
+                font-size: 1.05rem;
+                font-weight: 800;
+            ">
+                Viewing scenario: {selected_name}
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
 
         rows = list(signature_rows)
@@ -973,14 +1060,41 @@ def render_rally_ignition_panel(
         df["Player Label"] = df["Player"].apply(short_player_label)
         df = df.sort_values("Spot")
 
+        if "Rally Runs" in df.columns and "PA" in df.columns:
+            df["Rally Runs / 100 PA"] = (
+                100.0 * pd.to_numeric(df["Rally Runs"], errors="coerce").fillna(0)
+                / pd.to_numeric(df["PA"], errors="coerce").fillna(0).clip(lower=1)
+            ).round(1)
+        else:
+            df["Rally Runs / 100 PA"] = 0.0
+
+        df["Run Producer Percentile"] = df["Rally Runs / 100 PA"].rank(pct=True) * 100
+        df["Pressure Percentile"] = df["Rally Damage/100 PA"].rank(pct=True) * 100
+        df["Extension Percentile"] = df["Rally Extensions/100 PA"].rank(pct=True) * 100
+        df["Ignition Percentile"] = df["Rally Starts/100 PA"].rank(pct=True) * 100
+
         spark_row = df.sort_values("Ignition", ascending=False).iloc[0]
         extender_row = df.sort_values("Extension", ascending=False).iloc[0]
-        damage_row = df.sort_values("Damage", ascending=False).iloc[0]
+        run_row = df.sort_values("Rally Runs / 100 PA", ascending=False).iloc[0]
 
         metric_cols = st.columns(3)
-        metric_cols[0].metric("Best Rally Starter", str(spark_row["Player"]))
-        metric_cols[1].metric("Best Rally Extender", str(extender_row["Player"]))
-        metric_cols[2].metric("Best Damage Bat", str(damage_row["Player"]))
+
+        metric_cols[0].markdown(
+            f"**Best Rally Starter**  \n"
+            f"<span style='font-size:1.15rem;font-weight:800;'>{spark_row['Player']}</span>",
+            unsafe_allow_html=True,
+        )
+        metric_cols[1].markdown(
+            f"**Best Rally Extender**  \n"
+            f"<span style='font-size:1.15rem;font-weight:800;'>{extender_row['Player']}</span>",
+            unsafe_allow_html=True,
+        )
+        metric_cols[2].markdown(
+            f"**Best Run Producer**  \n"
+            f"<span style='font-size:1.15rem;font-weight:800;'>{run_row['Player']}</span>  \n"
+            f"<span style='opacity:.8;'>{float(run_row['Rally Runs / 100 PA']):.1f} runs / 100 PA</span>",
+            unsafe_allow_html=True,
+        )
 
         st.success(
             "Coach read: use this chart to see who starts innings, who keeps rallies alive, "
@@ -1036,6 +1150,7 @@ def render_rally_ignition_panel(
                     alt.Tooltip("Rally Starts/100 PA:Q", title="Ignites / 100 PA", format=".1f"),
                     alt.Tooltip("Rally Extensions/100 PA:Q", title="Extends / 100 PA", format=".1f"),
                     alt.Tooltip("Rally Damage/100 PA:Q", title="Damage / 100 PA", format=".1f"),
+                    alt.Tooltip("Rally Runs / 100 PA:Q", title="Rally runs / 100 PA", format=".1f"),
                 ],
             )
             .properties(height=300)
@@ -1043,15 +1158,21 @@ def render_rally_ignition_panel(
 
         st.altair_chart(chart, use_container_width=True)
 
+        telemetry = compare_items[0].get("simulation_telemetry", {})
+
+        n_games = telemetry.get("n_games", 0)
+        total_pa = telemetry.get("total_plate_appearances", 0)
+
         st.info(
-            "How to read it:\n"
-            "• Ignition = started rallies in the simulated games\n"
-            "• Extension = kept rally innings alive\n"
-            "• Damage = cashed in traffic with extra-base impact or run-producing plays"
+            f"Analzyed {n_games:,} games and {total_pa:,} plate appearances:\n"
+            "• Ignition = starts rallies\n"
+            "• Extension = keeps innings alive\n"
+            "• Pressure = increases scoring threat\n"
+            "• Runs = converts opportunities into runs"
         )
 
         pretty_rows = []
-        for row in rows:
+        for row in df.to_dict("records"):
             coach_read = rally_ignition_coach_read(row)
 
             pretty_rows.append(
@@ -1061,11 +1182,26 @@ def render_rally_ignition_panel(
                     "Rally Signature": coach_read,
                     "Rallies Started/100 PA": row.get("Rally Starts/100 PA", 0.0),
                     "Rallies Extended/100 PA": row.get("Rally Extensions/100 PA", 0.0),
-                    "Traffic Cashed In/100 PA": row.get("Rally Damage/100 PA", 0.0),
+                    "Pressure Created/100 PA": row.get("Rally Damage/100 PA", 0.0),
+                    "Runs Converted/100 PA": row.get("Rally Runs / 100 PA", 0.0),
+                    "Run %ile": f"{float(row.get('Run Producer Percentile', 0.0)):.0f}",
+                    "Pressure %ile": f"{float(row.get('Pressure Percentile', 0.0)):.0f}",
+                    "Extension %ile": f"{float(row.get('Extension Percentile', 0.0)):.0f}",
+                    "Ignition %ile": f"{float(row.get('Ignition Percentile', 0.0)):.0f}",
                 }
             )
 
         st.dataframe(pretty_rows, use_container_width=True, hide_index=True)
+
+        st.info(
+            "How to read it:\n"
+            "• These roles are relative to this team and this simulated lineup\n"
+            "• They do not claim a player is elite versus the league, age group, or All-Star pool\n"
+            "• Ignition = starts rallies\n"
+            "• Extension = keeps innings alive\n"
+            "• Pressure = makes innings dangerous\n"
+            "• Runs = converts rallies into runs"
+        )
 
 
 def team_entry_expander_token() -> int:
@@ -4558,6 +4694,7 @@ def render_coach_lab_comparison_section(
                 alt.Chart(bucket_long_df)
                 .mark_bar()
                 .encode(
+
                     x=alt.X(
                         "Bucket:N",
                         title="Runs Scored",
