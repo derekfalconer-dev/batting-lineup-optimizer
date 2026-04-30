@@ -209,6 +209,9 @@ class SimulationTelemetry:
             if event["damage"] or int(event["play_runs"]) > 0:
                 row.rally_damage_events += 1
 
+            if int(event["play_runs"]) > 0:
+                row.rally_runs += int(event["play_runs"])
+
     def as_dict(self) -> dict[str, Any]:
         rows = []
         max_pressure = max(
