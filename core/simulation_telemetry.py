@@ -262,6 +262,7 @@ class SimulationTelemetry:
                     "Rally Extensions/100 PA": round(100.0 * row.rally_extensions / max(row.plate_appearances, 1), 1),
                     "Rally Damage Events": int(row.rally_damage_events),
                     "Rally Damage/100 PA": round(100.0 * row.rally_damage_events / max(row.plate_appearances, 1), 1),
+                    "Rally Runs": int(row.rally_runs),
                     "Ignition": round(100.0 * ((row.rally_starts * 2.0) / max_ignition), 1),
                     "Extension": round(100.0 * (row.rally_extensions / max_ignition), 1),
                     "Damage": round(100.0 * (row.rally_damage_events / max_ignition), 1),
