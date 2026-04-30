@@ -32,6 +32,7 @@ class PlayerTelemetry:
     rally_starts: int = 0
     rally_extensions: int = 0
     rally_damage_events: int = 0
+    rally_runs: int = 0
 
 
 @dataclass
