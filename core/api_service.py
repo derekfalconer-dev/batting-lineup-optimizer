@@ -1258,9 +1258,12 @@ def evaluate_custom_lineup(
 
     profiles_override = _active_profiles_for_session(session)
 
+    team = manager.get_workspace_team_for_session(session_id)
+    lineup_names = [profile.name for profile in team.editable_profiles if profile.name not in team.benched_player_names]
+
     result = evaluate_lineup_workflow(
         data_source=session.data_source,
-        lineup_names=session.custom_lineup_names,
+        lineup_names=lineup_names,
         csv_path=session.csv_path,
         adjustments_path=session.adjustments_path,
         roster_path=session.roster_path,
