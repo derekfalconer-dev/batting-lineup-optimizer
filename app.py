@@ -10,6 +10,8 @@ import streamlit as st
 
 from ui.styles import inject_custom_styles
 
+from dataclasses import replace
+
 from ui.auth import (
     render_login_gate,
     require_authenticated_user,
@@ -1350,6 +1352,136 @@ def render_coach_lab_comparison_charts(
     st.dataframe(bucket_rows, use_container_width=True, hide_index=True)
 
 
+def _build_generic_rules_for_matchup_baseline(rules_config: dict) -> dict:
+    """
+    Return a generic-opponent version of the current rules.
+
+    Keeps game rules, strategy, scoring settings, etc.
+    Removes imported pitcher scouting effects.
+    """
+    generic = dict(rules_config or {})
+
+    generic["use_opponent_scouting"] = False
+    generic["opponent_pitcher_name"] = None
+    generic["opponent_pitcher_label"] = None
+    generic["opponent_pitcher_strikeout_multiplier"] = 1.0
+    generic["opponent_pitcher_walk_multiplier"] = 1.0
+    generic["opponent_pitcher_contact_multiplier"] = 1.0
+    generic["opponent_pitcher_power_multiplier"] = 1.0
+
+    # Keep manual/generic opponent baseline average unless you intentionally
+    # want generic baseline to include the imported opponent defense.
+    generic["opponent_level"] = "average"
+
+    return generic
+
+
+def render_matchup_impact_card(
+    *,
+    run_settings: dict,
+    optimized_result: object,
+    generic_same_lineup_result: dict | None,
+) -> None:
+    rules_config = run_settings.get("rules_config", {}) or {}
+
+    if not rules_config.get("use_opponent_scouting"):
+        return
+
+    pitcher_name = rules_config.get("opponent_pitcher_name") or "selected pitcher"
+    pitcher_label = rules_config.get("opponent_pitcher_label") or "Opponent profile"
+
+    pitcher_sample_size = rules_config.get("opponent_pitcher_sample_size")
+    pitcher_ip = rules_config.get("opponent_pitcher_innings_pitched")
+    pitcher_bf = rules_config.get("opponent_pitcher_batters_faced")
+
+    sample_label = {
+        "Low": "small",
+        "Medium": "medium",
+        "High": "large",
+    }.get(str(pitcher_sample_size), "")
+
+    sample_note = ""
+    if pitcher_sample_size in {"Low", "Medium"}:
+        try:
+            sample_note = (
+                f"\n\n⚠️ **Sample-size note:** {sample_label} data sample "
+                f"({float(pitcher_ip):.1f} IP, {int(pitcher_bf)} BF). "
+                "Use this as directional scouting and combine it with coach judgment."
+            )
+        except Exception:
+            sample_note = (
+                f"\n\n⚠️ **Sample-size note:** {sample_label or 'limited'} data sample. "
+                "Use this as directional scouting and combine it with coach judgment."
+            )
+
+    matchup_mean = None
+
+    try:
+        matchup_mean = float(optimized_result.metrics.mean_runs)
+    except Exception:
+        try:
+            matchup_mean = float(optimized_result.get("mean_runs"))
+        except Exception:
+            matchup_mean = None
+
+    generic_mean = None
+    if generic_same_lineup_result:
+        raw = generic_same_lineup_result.get("custom_lineup") or generic_same_lineup_result
+        try:
+            generic_mean = float(raw.get("mean_runs"))
+        except Exception:
+            generic_mean = None
+
+    if matchup_mean is None or generic_mean is None:
+        st.info(
+            f"**Why this lineup vs {pitcher_name}**\n\n"
+            f"{pitcher_label}. The optimizer is using this pitcher's scouting profile."
+        )
+        return
+
+    delta = matchup_mean - generic_mean
+    delta_text = f"{delta:+.2f} runs/game"
+
+    if delta < -0.05:
+        impact_sentence = f"This pitcher projects to suppress scoring by about **{abs(delta):.2f} runs/game**."
+    elif delta > 0.05:
+        impact_sentence = f"This matchup projects to add about **{delta:.2f} runs/game** versus a generic opponent."
+    else:
+        impact_sentence = "This pitcher grades close to a generic opponent for this lineup."
+
+    # Simple coach-facing bullets from the selected pitcher multipliers.
+    kx = float(rules_config.get("opponent_pitcher_strikeout_multiplier", 1.0) or 1.0)
+    bbx = float(rules_config.get("opponent_pitcher_walk_multiplier", 1.0) or 1.0)
+    cx = float(rules_config.get("opponent_pitcher_contact_multiplier", 1.0) or 1.0)
+
+    bullets = []
+
+    if kx >= 1.25:
+        bullets.append("Contact bats gain value because this pitcher creates extra strikeout pressure.")
+    if bbx <= 0.80:
+        bullets.append("Walk-reliant hitters lose some value because this pitcher limits free passes.")
+    elif bbx >= 1.20:
+        bullets.append("Patient hitters gain value because this pitcher is likely to give away baserunners.")
+    if cx <= 0.90:
+        bullets.append("Low-contact / high-chase bats are more exposed in this matchup.")
+
+    if not bullets:
+        bullets.append("The lineup stays close to normal because this pitcher profile is fairly neutral.")
+
+    bullet_md = "\n".join(f"- {b}" for b in bullets)
+
+    st.info(
+        f"### Why this lineup vs {pitcher_name}\n"
+        f"**{pitcher_label}**{sample_note}\n\n"
+        f"Expected scoring vs this pitcher: **{matchup_mean:.2f} runs/game**  \n"
+        f"Generic opponent baseline, same lineup: **{generic_mean:.2f} runs/game**  \n"
+        f"Impact: **{delta_text}**\n\n"
+        f"{impact_sentence}\n\n"
+        f"**Why the lineup may change:**\n"
+        f"{bullet_md}"
+    )
+
+
 def render_run_section(run_settings: dict) -> None:
     st.markdown("## Run Lineup Analysis")
     st.caption("Once your team is loaded, run the optimizer to compare batting orders.")
@@ -1367,6 +1499,12 @@ def render_run_section(run_settings: dict) -> None:
             st.markdown("### Ready to Analyze")
             st.write(f"Current team source: **{session_state.data_source}**")
             st.write(f"Scoring goal: **{run_settings['target_runs']:.1f} runs per game**")
+
+            rules_context = run_settings.get("rules_config", {})
+            if rules_context.get("use_opponent_scouting"):
+                pitcher_name = rules_context.get("opponent_pitcher_name") or "selected pitcher"
+                pitcher_label = rules_context.get("opponent_pitcher_label") or "opponent profile"
+                st.write(f"Opponent scouting: **{pitcher_name}** — {pitcher_label}")
 
         with status_col2:
             run_clicked = st.button(
@@ -1405,6 +1543,30 @@ def render_run_section(run_settings: dict) -> None:
                         optimizer_meta = dict(getattr(refreshed_results.coach_summary, "optimizer_meta", {}) or {})
 
                     st.success("Analysis complete.")
+
+                    generic_same_lineup_result = None
+
+                    try:
+                        rules_config = run_settings.get("rules_config", {}) or {}
+
+                        if rules_config.get("use_opponent_scouting"):
+                            generic_rules_config = _build_generic_rules_for_matchup_baseline(rules_config)
+
+                            generic_same_lineup_result = evaluate_custom_lineup(
+                                st.session_state.optimizer_session_id,
+                                target_runs=float(run_settings["target_runs"]),
+                                n_games=int(run_settings["optimizer_config"].get("refine_games", 3000)),
+                                seed=int(run_settings["optimizer_config"].get("seed", 42)) + 909,
+                                display_name="Generic Opponent Baseline",
+                                rules=RulesConfig(**generic_rules_config),
+                            )
+
+                    except Exception as exc:
+                        generic_same_lineup_result = None
+                        st.warning(f"Could not compute generic opponent baseline: {exc}")
+
+                    st.session_state.matchup_impact_generic_baseline = generic_same_lineup_result
+
                     st.rerun()
                 except Exception as exc:
                     st.error(f"Optimization failed: {exc}")
@@ -2453,6 +2615,15 @@ def render_coach_lab_comparison_section(
         help="Saved scenarios are included by default. Remove any lines you do not want to compare.",
     )
 
+    MAX_COMPARE_SCENARIOS = 5
+
+    if len(selected_saved_names) > MAX_COMPARE_SCENARIOS:
+        st.warning(
+            f"Showing the first {MAX_COMPARE_SCENARIOS} selected scenarios. "
+            "Remove a few saved scenarios to compare a different set."
+        )
+        selected_saved_names = selected_saved_names[:MAX_COMPARE_SCENARIOS]
+
     compare_items = build_chart_compare_set(
         results=results,
         custom_eval_payload=custom_eval_payload,
@@ -2795,7 +2966,7 @@ def render_custom_lineup_result(
     c1.metric("Custom lineup average runs", f"{custom['mean_runs']:.2f}")
 
     if optimized is not None:
-        c2.metric("Best for current roster", f"{optimized.metrics.mean_runs:.2f}")
+        c2.metric("Optimized lineup avg runs", f"{optimized.metrics.mean_runs:.2f}")
     else:
         c2.metric("Optimized lineup avg runs", "—")
 
@@ -2812,7 +2983,7 @@ def render_custom_lineup_result(
 
     if optimized is not None:
         c5.metric(
-            f"Best roster chance of {target_runs:.0f}+",
+            f"Optimized chance of {target_runs:.0f}+",
             f"{optimized.metrics.prob_ge_target:.1%}",
         )
     else:
@@ -2954,6 +3125,28 @@ def render_coach_lab(
                             )
 
                             st.session_state.coach_lab_last_custom_eval = custom_eval
+
+                            generic_same_lineup_result = None
+                            rules_config = run_settings.get("rules_config", {}) or {}
+
+                            if rules_config.get("use_opponent_scouting"):
+                                try:
+                                    generic_rules_config = _build_generic_rules_for_matchup_baseline(rules_config)
+
+                                    generic_same_lineup_result = evaluate_custom_lineup(
+                                        st.session_state.optimizer_session_id,
+                                        target_runs=float(run_settings["target_runs"]),
+                                        n_games=int(run_settings["optimizer_config"].get("refine_games", 3000)),
+                                        seed=int(run_settings["optimizer_config"].get("seed", 42)) + 909,
+                                        display_name="Generic Opponent Baseline",
+                                        rules=RulesConfig(**generic_rules_config),
+                                    )
+                                except Exception as exc:
+                                    generic_same_lineup_result = None
+                                    st.warning(f"Could not compute generic opponent baseline: {exc}")
+
+                            st.session_state.matchup_impact_generic_baseline = generic_same_lineup_result
+
                             st.session_state.coach_lab_workspace_mode = "optimized"
                             st.session_state.coach_lab_include_live_custom = True
 
@@ -3391,6 +3584,13 @@ def render_coach_lab(
                         st.error(f"Could not add player: {exc}")
 
     baseline_results = results or st.session_state.get("last_completed_results")
+
+    if baseline_results is not None:
+        render_matchup_impact_card(
+            run_settings=run_settings,
+            optimized_result=baseline_results.optimized,
+            generic_same_lineup_result=st.session_state.get("matchup_impact_generic_baseline"),
+        )
 
     render_custom_lineup_result(
         st.session_state.get("coach_lab_last_custom_eval"),
@@ -4068,6 +4268,10 @@ def main() -> None:
     render_team_switcher()
 
     run_settings = render_sidebar(backend_session)
+
+    if not run_settings.get("rules_config", {}).get("use_opponent_scouting"):
+        st.session_state.matchup_impact_generic_baseline = None
+
     st.session_state.run_settings_cache = run_settings
 
     render_model_limitations_panel()

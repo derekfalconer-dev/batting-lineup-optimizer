@@ -21,6 +21,12 @@ class OpposingPitchingStrength(str, Enum):
     STRONG = "strong"
     ELITE = "elite"
 
+    # matchup archetypes
+    POWER_ARM = "power_arm"
+    CRAFTY = "crafty"
+    WILD = "wild"
+    BALANCED_ARM = "balanced_arm"
+
 
 class OpponentLevel(str, Enum):
     WEAK = "weak"
@@ -47,6 +53,15 @@ class Player:
     steal_skill: float = 0.5
     baserunning_iq: float = 0.5
     sacrifice_ability: float = 0.5
+    # Optional offensive traits copied from PlayerProfile.
+    # These let opponent pitcher effects vary by batter instead of applying
+    # the same global multiplier to every hitter.
+    contact_trait: float = 0.5
+    power_trait: float = 0.5
+    discipline_trait: float = 0.5
+    walk_skill_trait: float = 0.5
+    strikeout_tendency_trait: float = 0.5
+    chase_tendency_trait: float = 0.5
 
     def normalize(self):
         total = (
@@ -91,6 +106,22 @@ class RulesConfig:
     coaching_style: CoachingStyle = CoachingStyle.BALANCED
     opposing_pitching: OpposingPitchingStrength = OpposingPitchingStrength.AVERAGE
     opponent_level: OpponentLevel = OpponentLevel.AVERAGE
+
+    # Imported opponent scouting report context
+    use_opponent_scouting: bool = False
+    opponent_pitcher_name: str | None = None
+    opponent_pitcher_label: str | None = None
+    opponent_pitcher_strikeout_multiplier: float = 1.0
+    opponent_pitcher_walk_multiplier: float = 1.0
+    opponent_pitcher_contact_multiplier: float = 1.0
+    opponent_pitcher_power_multiplier: float = 1.0
+
+    # Imported opponent pitcher sample-size metadata
+    opponent_pitcher_sample_size: str | None = None
+    opponent_pitcher_innings_pitched: float | None = None
+    opponent_pitcher_batters_faced: int | None = None
+
+    # Derived modifiers
 
     # Derived modifiers
     contact_multiplier: float = 1.0
@@ -178,6 +209,21 @@ def compile_rules_context(rules: RulesConfig) -> RulesConfig:
         compiled.strikeout_multiplier *= 1.18
         compiled.power_multiplier *= 0.90
         compiled.productive_out_env_multiplier *= 1.05
+    elif compiled.opposing_pitching == OpposingPitchingStrength.POWER_ARM:
+        compiled.contact_multiplier *= 0.85
+        compiled.strikeout_multiplier *= 1.25
+        compiled.power_multiplier *= 0.96
+    elif compiled.opposing_pitching == OpposingPitchingStrength.CRAFTY:
+        compiled.contact_multiplier *= 1.15
+        compiled.power_multiplier *= 0.85
+        compiled.strikeout_multiplier *= 0.95
+        compiled.productive_out_env_multiplier *= 1.05
+    elif compiled.opposing_pitching == OpposingPitchingStrength.WILD:
+        compiled.walk_multiplier *= 1.22
+        compiled.strikeout_multiplier *= 1.0
+        compiled.contact_multiplier *= 0.97
+    elif compiled.opposing_pitching == OpposingPitchingStrength.BALANCED_ARM:
+        pass
 
     # Opponent level / defense
     if compiled.opponent_level == OpponentLevel.WEAK:
@@ -186,5 +232,9 @@ def compile_rules_context(rules: RulesConfig) -> RulesConfig:
     elif compiled.opponent_level == OpponentLevel.STRONG:
         compiled.advancement_success_multiplier *= 0.93
         compiled.productive_out_env_multiplier *= 0.95
+
+    # Specific imported opposing pitcher effects are applied per batter in
+    # app_service._apply_environment_to_players(), because batter traits matter.
+    # Do not apply those numeric pitcher multipliers globally here.
 
     return compiled

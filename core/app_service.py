@@ -349,6 +349,90 @@ def evaluate_lineup_workflow(
     }
 
 
+def _clamp_float(value: float, low: float, high: float) -> float:
+    return max(low, min(high, float(value)))
+
+
+def _trait(player: Any, name: str, default: float = 0.5) -> float:
+    return _clamp_float(float(getattr(player, name, default) or default), 0.0, 1.0)
+
+
+def _personalized_pitcher_effects(player: Any, rules: RulesConfig) -> dict[str, float]:
+    """
+    Convert selected opponent pitcher multipliers into batter-specific multipliers.
+
+    Raw pitcher profile still matters:
+    - Musicant's 1.85 strikeout pressure stays extreme.
+    - Pannese's walk volatility stays high.
+
+    But batter traits shape exposure:
+    - high-contact bats resist K pressure better
+    - high-K / chase bats get hurt more by high-K arms
+    - disciplined / walk-skill bats benefit more from wild arms
+    """
+
+    pitcher_k = float(getattr(rules, "opponent_pitcher_strikeout_multiplier", 1.0) or 1.0)
+    pitcher_bb = float(getattr(rules, "opponent_pitcher_walk_multiplier", 1.0) or 1.0)
+    pitcher_contact = float(getattr(rules, "opponent_pitcher_contact_multiplier", 1.0) or 1.0)
+    pitcher_power = float(getattr(rules, "opponent_pitcher_power_multiplier", 1.0) or 1.0)
+
+    contact = _trait(player, "contact_trait")
+    power = _trait(player, "power_trait")
+    discipline = _trait(player, "discipline_trait")
+    walk_skill = _trait(player, "walk_skill_trait")
+    k_tendency = _trait(player, "strikeout_tendency_trait")
+    chase = _trait(player, "chase_tendency_trait")
+
+    # High-contact hitters are more resilient. High-K/chase hitters are more exposed.
+    k_exposure = (
+        0.90
+        + 0.42 * k_tendency
+        + 0.20 * chase
+        - 0.38 * contact
+        - 0.12 * discipline
+    )
+    k_exposure = _clamp_float(k_exposure, 0.55, 1.30)
+
+    # Contact suppression also hurts low-contact/high-K bats more.
+    contact_exposure = (
+        0.95
+        + 0.34 * k_tendency
+        + 0.16 * chase
+        - 0.36 * contact
+    )
+    contact_exposure = _clamp_float(contact_exposure, 0.55, 1.25)
+
+    # Walk effects:
+    # - wild pitchers: disciplined hitters gain more
+    # - strike throwers: disciplined hitters are less suppressed
+    if pitcher_bb >= 1.0:
+        walk_exposure = (
+            0.75
+            + 0.45 * walk_skill
+            + 0.35 * discipline
+            - 0.25 * chase
+        )
+    else:
+        walk_exposure = (
+            1.15
+            - 0.35 * walk_skill
+            - 0.30 * discipline
+            + 0.20 * chase
+        )
+    walk_exposure = _clamp_float(walk_exposure, 0.45, 1.45)
+
+    # Power impact is light for now. Strong power hitters preserve more damage.
+    power_exposure = 1.00 - 0.25 * power + 0.15 * k_tendency
+    power_exposure = _clamp_float(power_exposure, 0.65, 1.20)
+
+    return {
+        "strikeout": 1.0 + ((pitcher_k - 1.0) * k_exposure),
+        "walk": 1.0 + ((pitcher_bb - 1.0) * walk_exposure),
+        "contact": 1.0 + ((pitcher_contact - 1.0) * contact_exposure),
+        "power": 1.0 + ((pitcher_power - 1.0) * power_exposure),
+    }
+
+
 def _apply_environment_to_players(
     players: list[Any],
     rules: RulesConfig,
@@ -371,6 +455,16 @@ def _apply_environment_to_players(
         player.p_hr *= rules.power_multiplier
         player.p_bb *= rules.walk_multiplier
         player.p_so *= rules.strikeout_multiplier
+
+        if getattr(rules, "use_opponent_scouting", False):
+            matchup = _personalized_pitcher_effects(player, rules)
+
+            player.p_1b *= matchup["contact"]
+            player.p_2b *= matchup["contact"] * matchup["power"]
+            player.p_3b *= matchup["contact"] * matchup["power"]
+            player.p_hr *= matchup["power"]
+            player.p_bb *= matchup["walk"]
+            player.p_so *= matchup["strikeout"]
 
         player.normalize()
         tuned_players.append(player)
