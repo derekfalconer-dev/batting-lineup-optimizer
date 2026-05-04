@@ -666,6 +666,15 @@ def profile_to_player(profile: PlayerProfile) -> Player:
         steal_skill=_clamp_0_1(0.55 * speed + 0.45 * baserunning),
         baserunning_iq=_clamp_0_1(0.65 * baserunning + 0.35 * discipline),
         sacrifice_ability=_clamp_0_1(sacrifice_ability),
+
+        # Carry batter traits into the simulator so opponent pitcher effects
+        # can vary by hitter instead of applying one team-wide adjustment.
+        contact_trait=_clamp_0_1(contact),
+        power_trait=_clamp_0_1(power),
+        discipline_trait=_clamp_0_1(discipline),
+        walk_skill_trait=_clamp_0_1(walk_skill),
+        strikeout_tendency_trait=_clamp_0_1(k_tendency),
+        chase_tendency_trait=_clamp_0_1(t.chase_tendency / 100.0),
     )
     player.normalize()
     return player

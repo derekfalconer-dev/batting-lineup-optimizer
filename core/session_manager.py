@@ -54,6 +54,10 @@ class TeamRecord:
     aggregate_player_records: dict[str, AggregatePlayerRecord] = field(default_factory=dict)
     player_aliases: dict[str, str] = field(default_factory=dict)
 
+    opponent_reports: list[dict[str, Any]] = field(default_factory=list)
+    active_opponent_report_id: Optional[str] = None
+    active_opponent_pitcher_name: Optional[str] = None
+
     created_at: float = field(default_factory=lambda: time.time())
     updated_at: float = field(default_factory=lambda: time.time())
 
@@ -317,6 +321,9 @@ class SessionManager:
                 for player_id, record in team.aggregate_player_records.items()
             },
             "player_aliases": dict(team.player_aliases),
+            "opponent_reports": list(team.opponent_reports),
+            "active_opponent_report_id": team.active_opponent_report_id,
+            "active_opponent_pitcher_name": team.active_opponent_pitcher_name,
             "created_at": team.created_at,
             "updated_at": team.updated_at,
             "owner_user_id": team.owner_user_id,
@@ -345,6 +352,9 @@ class SessionManager:
                 str(alias): str(player_id)
                 for alias, player_id in data.get("player_aliases", {}).items()
             },
+            opponent_reports=list(data.get("opponent_reports", [])),
+            active_opponent_report_id=data.get("active_opponent_report_id"),
+            active_opponent_pitcher_name=data.get("active_opponent_pitcher_name"),
             created_at=float(data.get("created_at", __import__("time").time())),
             updated_at=float(data.get("updated_at", __import__("time").time())),
             owner_user_id=str(data.get("owner_user_id", "")),
@@ -384,6 +394,9 @@ class SessionManager:
             rules_config={},
             aggregate_player_records={},
             player_aliases={},
+            opponent_reports=[],
+            active_opponent_report_id=None,
+            active_opponent_pitcher_name=None,
         )
         self._save_team(team)
         return team

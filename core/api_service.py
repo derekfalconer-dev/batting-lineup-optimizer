@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
+import time
 
 from core.app_service import evaluate_lineup_workflow, run_optimizer_workflow
 
@@ -24,6 +26,8 @@ from core.player_factory import (
 )
 
 from core.json_io import load_json_file
+from core.maxpreps_pdf_parser import parse_maxpreps_pdf
+from core.opponent_profiles import build_opponent_team_profile
 
 from core.session_manager import OptimizerSession, get_session_manager
 
@@ -548,6 +552,228 @@ def apply_gamechanger_data_addition(
     )
 
     return _present_session(refreshed_session), apply_summary
+
+
+def import_opponent_maxpreps_pdf(
+    session_id: str,
+    *,
+    pdf_path: str | Path,
+    source_file_name: str | None = None,
+) -> dict[str, Any]:
+    """
+    Parse a MaxPreps opponent PDF and attach the derived opponent profile
+    to the active team.
+
+    Backend-only Phase 3C:
+    - no UI
+    - no simulator wiring
+    - stores report payload on TeamRecord
+    """
+    manager = get_session_manager()
+    session = manager.get_session(session_id)
+
+    if not session.team_id:
+        raise ValueError("Session is not attached to a team.")
+
+    report = parse_maxpreps_pdf(pdf_path)
+    opponent_profile = build_opponent_team_profile(report)
+
+    payload = opponent_profile.as_dict()
+    report_id = uuid4().hex[:12]
+
+    payload.update(
+        {
+            "opponent_report_id": report_id,
+            "source_file_name": source_file_name or Path(pdf_path).name,
+            "source_path": str(pdf_path),
+            "imported_at": time.time(),
+        }
+    )
+
+    team = manager.get_workspace_team_for_session(session_id)
+
+    # Replace same source file import if re-imported; otherwise append.
+    existing_reports = list(getattr(team, "opponent_reports", []) or [])
+    existing_reports = [
+        item
+        for item in existing_reports
+        if str(item.get("source_file_name", "")) != str(payload["source_file_name"])
+    ]
+    existing_reports.append(payload)
+
+    team.opponent_reports = existing_reports
+    team.active_opponent_report_id = report_id
+
+    pitchers = list(payload.get("pitchers", []) or [])
+    if pitchers:
+        team.active_opponent_pitcher_name = str(pitchers[0].get("name", ""))
+    else:
+        team.active_opponent_pitcher_name = None
+
+    team.import_history.append(
+        {
+            "import_type": "opponent_maxpreps_pdf",
+            "opponent_report_id": report_id,
+            "opponent_team_name": payload.get("team_name"),
+            "source_file_name": payload["source_file_name"],
+            "pitchers_loaded": len(pitchers),
+            "fielding_pct": payload.get("fielding_pct"),
+            "team_k_rate": payload.get("team_k_rate"),
+            "team_bb_rate": payload.get("team_bb_rate"),
+            "imported_at": payload["imported_at"],
+        }
+    )
+
+    team.touch()
+    manager.mark_workspace_dirty(session_id)
+    manager.flush_workspace_team(session_id)
+    manager.refresh_workspace_team(session_id)
+
+    return payload
+
+
+def list_opponent_reports(
+    session_id: str,
+) -> list[dict[str, Any]]:
+    manager = get_session_manager()
+    session = manager.get_session(session_id)
+
+    if not session.team_id:
+        return []
+
+    team = manager.get_workspace_team_for_session(session_id)
+    return list(getattr(team, "opponent_reports", []) or [])
+
+
+def get_active_opponent_context(
+    session_id: str,
+) -> dict[str, Any] | None:
+    manager = get_session_manager()
+    session = manager.get_session(session_id)
+
+    if not session.team_id:
+        return None
+
+    team = manager.get_workspace_team_for_session(session_id)
+
+    report_id = getattr(team, "active_opponent_report_id", None)
+    pitcher_name = getattr(team, "active_opponent_pitcher_name", None)
+
+    reports = list(getattr(team, "opponent_reports", []) or [])
+    report = next(
+        (item for item in reports if item.get("opponent_report_id") == report_id),
+        reports[-1] if reports else None,
+    )
+
+    if not report:
+        return None
+
+    pitchers = list(report.get("pitchers", []) or [])
+    pitcher = next(
+        (p for p in pitchers if p.get("name") == pitcher_name),
+        pitchers[0] if pitchers else None,
+    )
+
+    return {
+        "report": report,
+        "pitcher": pitcher,
+        "derived_opponent_level": report.get("derived_opponent_level"),
+    }
+
+
+def select_active_opponent_pitcher(
+    session_id: str,
+    *,
+    opponent_report_id: str,
+    pitcher_name: str,
+) -> dict[str, Any]:
+    manager = get_session_manager()
+    session = manager.get_session(session_id)
+
+    if not session.team_id:
+        raise ValueError("Session is not attached to a team.")
+
+    team = manager.get_workspace_team_for_session(session_id)
+    reports = list(getattr(team, "opponent_reports", []) or [])
+
+    report = next(
+        (item for item in reports if item.get("opponent_report_id") == opponent_report_id),
+        None,
+    )
+    if not report:
+        raise ValueError(f"Opponent report not found: {opponent_report_id}")
+
+    pitchers = list(report.get("pitchers", []) or [])
+    pitcher = next((p for p in pitchers if p.get("name") == pitcher_name), None)
+    if not pitcher:
+        raise ValueError(f"Pitcher not found in opponent report: {pitcher_name}")
+
+    team.active_opponent_report_id = opponent_report_id
+    team.active_opponent_pitcher_name = pitcher_name
+    team.touch()
+
+    manager.mark_workspace_dirty(session_id)
+    manager.flush_workspace_team(session_id)
+    manager.refresh_workspace_team(session_id)
+
+    return {
+        "report": report,
+        "pitcher": pitcher,
+        "derived_opponent_level": report.get("derived_opponent_level"),
+    }
+
+
+def clear_active_opponent_context(
+    session_id: str,
+) -> None:
+    manager = get_session_manager()
+    session = manager.get_session(session_id)
+
+    if not session.team_id:
+        raise ValueError("Session is not attached to a team.")
+
+    team = manager.get_workspace_team_for_session(session_id)
+    team.active_opponent_report_id = None
+    team.active_opponent_pitcher_name = None
+    team.touch()
+
+    manager.mark_workspace_dirty(session_id)
+    manager.flush_workspace_team(session_id)
+    manager.refresh_workspace_team(session_id)
+
+
+def delete_opponent_report(
+    session_id: str,
+    *,
+    opponent_report_id: str,
+) -> None:
+    manager = get_session_manager()
+    session = manager.get_session(session_id)
+
+    if not session.team_id:
+        raise ValueError("Session is not attached to a team.")
+
+    team = manager.get_workspace_team_for_session(session_id)
+    reports = list(getattr(team, "opponent_reports", []) or [])
+
+    remaining = [
+        report for report in reports
+        if str(report.get("opponent_report_id")) != str(opponent_report_id)
+    ]
+
+    if len(remaining) == len(reports):
+        raise ValueError(f"Opponent report not found: {opponent_report_id}")
+
+    team.opponent_reports = remaining
+
+    if team.active_opponent_report_id == opponent_report_id:
+        team.active_opponent_report_id = None
+        team.active_opponent_pitcher_name = None
+
+    team.touch()
+    manager.mark_workspace_dirty(session_id)
+    manager.flush_workspace_team(session_id)
+    manager.refresh_workspace_team(session_id)
 
 
 def update_adjustments_path(

@@ -7,6 +7,7 @@ altair
 Authlib==1.3.2
 httpx==0.27.2
 psycopg[binary]>=3.2
+PyMuPDF
 
 # NOTE:n
 # Streamlit/Authlib versions pinned due to OAuth CSRF mismatch bug seen on Streamlit Cloud.
