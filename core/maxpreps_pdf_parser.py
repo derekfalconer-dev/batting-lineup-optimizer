@@ -223,36 +223,87 @@ def _parse_pitching_rows(text: str, report: MaxPrepsOpponentReport) -> None:
     rows: list[MaxPrepsPitchingRow] = []
 
     # ONLY parse the reliable "core stat" table (page 5)
-    pattern = re.compile(
+    # Parse the reliable "core stat" table:
+    # # Athlete Name IP H R ER BB K 2B 3B HR BF AB
+    #
+    # MaxPreps sometimes omits zero-value trailing middle columns in PDF text
+    # extraction. Example:
+    #   D. Maya ... 12.1 30 33 21 12 7 2 89 71
+    # means:
+    #   IP=12.1 H=30 R=33 ER=21 BB=12 K=7 2B=2 3B=0 HR=0 BF=89 AB=71
+    #
+    # So we parse the row line and tolerate 9, 10, or 11 numeric stat tokens.
+    row_pattern = re.compile(
         r"^\s*(?P<num>\d+)\s+"
-        r"(?P<name>[A-Z]\.\s+[A-Za-z'’-]+)\s+\((?P<grade>[^)]+)\)\s+"
-        r"(?P<ip>[0-9.]+)\s+"
-        r"(?P<h>\d+)\s+(?P<r>\d+)\s+(?P<er>\d+)\s+"
-        r"(?P<bb>\d+)\s+(?P<k>\d+)\s+"
-        r"(?P<d2>\d+)\s+(?P<d3>\d+)\s+(?P<hr>\d+)\s+"
-        r"(?P<bf>\d+)\s+(?P<ab>\d+)",
+        r"(?P<name>[A-Z]\.\s+[A-Za-z'’\-\s]+?)\s+\((?P<grade>[^)]+)\)\s+"
+        r"(?P<stats>[0-9.\s]+)$",
         re.MULTILINE,
     )
 
-    for match in pattern.finditer(pitching_section):
+    for match in row_pattern.finditer(pitching_section):
+        stat_tokens = match.group("stats").split()
+
+        # Need at least: IP H R ER BB K BF AB
+        if len(stat_tokens) < 8:
+            continue
+
+        ip = stat_tokens[0]
+        h = stat_tokens[1]
+        r = stat_tokens[2]
+        er = stat_tokens[3]
+        bb = stat_tokens[4]
+        k = stat_tokens[5]
+
+        # Remaining columns are some form of:
+        # full:      2B 3B HR BF AB
+        # common:    2B BF AB              (3B/HR omitted as zero)
+        # possible:  2B 3B BF AB           (HR omitted as zero)
+        remaining = stat_tokens[6:]
+
+        doubles_allowed = 0
+        triples_allowed = 0
+        homers_allowed = 0
+        bf = None
+        ab = None
+
+        if len(remaining) >= 5:
+            doubles_allowed = _safe_int(remaining[0]) or 0
+            triples_allowed = _safe_int(remaining[1]) or 0
+            homers_allowed = _safe_int(remaining[2]) or 0
+            bf = remaining[3]
+            ab = remaining[4]
+        elif len(remaining) == 4:
+            doubles_allowed = _safe_int(remaining[0]) or 0
+            triples_allowed = _safe_int(remaining[1]) or 0
+            homers_allowed = 0
+            bf = remaining[2]
+            ab = remaining[3]
+        elif len(remaining) == 3:
+            doubles_allowed = _safe_int(remaining[0]) or 0
+            triples_allowed = 0
+            homers_allowed = 0
+            bf = remaining[1]
+            ab = remaining[2]
+        else:
+            continue
+
         row = MaxPrepsPitchingRow(
             number=match.group("num"),
-            name=match.group("name").strip(),
+            name=" ".join(match.group("name").strip().split()),
             grade=match.group("grade").strip(),
-            innings_pitched=_parse_innings(match.group("ip")),
-            hits_allowed=_safe_int(match.group("h")),
-            runs_allowed=_safe_int(match.group("r")),
-            earned_runs=_safe_int(match.group("er")),
-            walks=_safe_int(match.group("bb")),
-            strikeouts=_safe_int(match.group("k")),
-            doubles_allowed=_safe_int(match.group("d2")),
-            triples_allowed=_safe_int(match.group("d3")),
-            homers_allowed=_safe_int(match.group("hr")),
-            batters_faced=_safe_int(match.group("bf")),
-            at_bats_against=_safe_int(match.group("ab")),
+            innings_pitched=_parse_innings(ip),
+            hits_allowed=_safe_int(h),
+            runs_allowed=_safe_int(r),
+            earned_runs=_safe_int(er),
+            walks=_safe_int(bb),
+            strikeouts=_safe_int(k),
+            doubles_allowed=doubles_allowed,
+            triples_allowed=triples_allowed,
+            homers_allowed=homers_allowed,
+            batters_faced=_safe_int(bf),
+            at_bats_against=_safe_int(ab),
         )
         rows.append(row)
-
     # Filter garbage rows (no IP or BF)
     report.pitchers = [
         r for r in rows

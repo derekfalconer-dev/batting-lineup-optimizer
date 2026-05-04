@@ -172,8 +172,35 @@ def render_opponent_scouting_panel() -> None:
     active_pitcher_name = None
 
     if active_context:
-        active_report_id = active_context.get("report", {}).get("opponent_report_id")
-        active_pitcher_name = active_context.get("pitcher", {}).get("name")
+        active_report = active_context.get("report") or {}
+        active_pitcher = active_context.get("pitcher") or {}
+
+        active_report_id = active_report.get("opponent_report_id")
+        active_pitcher_name = active_pitcher.get("name")
+
+    # If the saved active report exists but the selected pitcher is missing
+    # or stale, select the first available pitcher from that report.
+    if active_report_id and not active_pitcher_name:
+        matching_report = next(
+            (
+                report for report in reports
+                if str(report.get("opponent_report_id")) == str(active_report_id)
+            ),
+            None,
+        )
+
+        matching_pitchers = list((matching_report or {}).get("pitchers", []) or [])
+
+        if matching_pitchers:
+            try:
+                select_active_opponent_pitcher(
+                    st.session_state.optimizer_session_id,
+                    opponent_report_id=str(active_report_id),
+                    pitcher_name=str(matching_pitchers[0]["name"]),
+                )
+                st.rerun()
+            except Exception as exc:
+                st.sidebar.error(f"Could not repair opponent pitcher selection: {exc}")
 
     default_report_index = 0
     for idx, label in enumerate(report_labels):
@@ -191,10 +218,50 @@ def render_opponent_scouting_panel() -> None:
     selected_report = report_by_label[selected_report_label]
     pitchers = list(selected_report.get("pitchers", []) or [])
 
+    with st.sidebar.expander("Manage saved opponent report", expanded=False):
+        st.caption(
+            "Deleting removes this scouting report from the current team. "
+            "This cannot be undone."
+        )
+
+        confirm_delete = st.checkbox(
+            "Yes, delete this opponent report",
+            key=f"confirm_delete_opponent_report_{selected_report.get('opponent_report_id', 'report')}",
+        )
+
+        if st.button(
+                "Delete Opponent Report",
+                use_container_width=True,
+                disabled=not confirm_delete,
+                key=f"delete_opponent_report_{selected_report.get('opponent_report_id', 'report')}",
+        ):
+            try:
+                delete_opponent_report(
+                    st.session_state.optimizer_session_id,
+                    opponent_report_id=str(selected_report["opponent_report_id"]),
+                )
+                st.success("Opponent report deleted.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Could not delete opponent report: {exc}")
+
     if not pitchers:
         st.sidebar.warning("This opponent report has no pitcher profiles.")
         return
 
+    # Deduplicate pitcher names in case a MaxPreps PDF table split causes
+    # the same pitcher to be parsed more than once.
+    deduped_pitchers = []
+    seen_pitcher_names = set()
+
+    for pitcher in pitchers:
+        pitcher_name = str(pitcher.get("name", "Unknown pitcher"))
+        if pitcher_name in seen_pitcher_names:
+            continue
+        seen_pitcher_names.add(pitcher_name)
+        deduped_pitchers.append(pitcher)
+
+    pitchers = deduped_pitchers
     pitcher_names = [str(p.get("name", "Unknown pitcher")) for p in pitchers]
 
     default_pitcher_index = 0
@@ -288,33 +355,6 @@ def render_opponent_scouting_panel() -> None:
         st.sidebar.caption(
             f"Opponent defense: {float(fielding_pct):.3f} FP → {str(defense_level).title()} level"
         )
-
-    with st.sidebar.expander("Manage saved opponent report", expanded=False):
-        st.caption(
-            "Deleting removes this scouting report from the current team. "
-            "This cannot be undone."
-        )
-
-        confirm_delete = st.checkbox(
-            "Yes, delete this opponent report",
-            key=f"confirm_delete_opponent_report_{selected_report.get('opponent_report_id', 'report')}",
-        )
-
-        if st.button(
-                "Delete Opponent Report",
-                use_container_width=True,
-                disabled=not confirm_delete,
-                key=f"delete_opponent_report_{selected_report.get('opponent_report_id', 'report')}",
-        ):
-            try:
-                delete_opponent_report(
-                    st.session_state.optimizer_session_id,
-                    opponent_report_id=str(selected_report["opponent_report_id"]),
-                )
-                st.success("Opponent report deleted.")
-                st.rerun()
-            except Exception as exc:
-                st.error(f"Could not delete opponent report: {exc}")
 
 
 def render_sidebar(session_state: SessionStateSchema) -> dict:

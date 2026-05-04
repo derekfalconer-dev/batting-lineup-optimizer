@@ -681,6 +681,22 @@ def get_active_opponent_context(
     }
 
 
+def delete_opponent_report(session_id: str, opponent_report_id: str) -> None:
+    manager = get_session_manager()
+    session = manager.get_session(session_id)
+
+    reports = list(session.get("opponent_reports", []))
+
+    reports = [
+        r for r in reports
+        if str(r.get("opponent_report_id")) != str(opponent_report_id)
+    ]
+
+    session["opponent_reports"] = reports
+
+    manager.save_session(session_id, session)
+
+
 def select_active_opponent_pitcher(
     session_id: str,
     *,
