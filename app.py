@@ -3477,8 +3477,12 @@ def render_coach_lab(
             low_conf_count, medium_conf_count, high_conf_count = build_confidence_summary(editable_profiles)
 
             if low_conf_count > 0 or medium_conf_count > 0 or high_conf_count > 0:
-                with st.container(border=True):
-                    st.markdown("#### Roster data confidence")
+                confidence_summary_label = (
+                    f"Roster data confidence: 🔴 Low {low_conf_count} · "
+                    f"🟡 Medium {medium_conf_count} · 🟢 High {high_conf_count}"
+                )
+
+                with st.expander(confidence_summary_label, expanded=False):
                     st.caption(
                         "How many players on your roster are this confidence level. Yellow and red players are good candidates for a quick profile check and small coach tweaks before simulating."
                     )
@@ -3486,22 +3490,13 @@ def render_coach_lab(
                     conf_col1, conf_col2, conf_col3 = st.columns(3)
 
                     with conf_col1:
-                        if low_conf_count:
-                            st.write(f"🔴 Low: {low_conf_count}")
-                        else:
-                            st.write("🔴 Low: 0")
+                        st.write(f"🔴 Low: {low_conf_count}")
 
                     with conf_col2:
-                        if medium_conf_count:
-                            st.write(f"🟡 Medium: {medium_conf_count}")
-                        else:
-                            st.write("🟡 Medium: 0")
+                        st.write(f"🟡 Medium: {medium_conf_count}")
 
                     with conf_col3:
-                        if high_conf_count:
-                            st.write(f"🟢 High: {high_conf_count}")
-                        else:
-                            st.write("🟢 High: 0")
+                        st.write(f"🟢 High: {high_conf_count}")
 
                     if low_conf_count > 0:
                         st.markdown(
@@ -3529,6 +3524,10 @@ def render_coach_lab(
                             )
 
         with st.expander("Active batting order", expanded=True):
+            st.caption(
+                "Data confidence: 🟢 strong sample · 🟡 usable, review if important · 🔴 low sample, check/tweak before trusting."
+            )
+
             if lineup_profiles:
                 for idx, profile in enumerate(lineup_profiles, start=1):
                     render_expandable_player_editor(
@@ -3563,57 +3562,58 @@ def render_coach_lab(
                         slot_number=None,
                     )
 
-        if not editable_profiles:
-            st.markdown("### Add your first player")
-            st.caption("Choose an archetype, enter a name, and click Add Player to begin building the roster.")
-        else:
-            st.markdown("##### Add player from archetype")
-            st.caption("Use this to test where a new player might fit in the lineup before game day.")
+            if not editable_profiles:
+                st.markdown("### Add your first player")
+                st.caption("Choose an archetype, enter a name, and click Add Player to begin building the roster.")
+            else:
+                st.markdown("##### Add player from archetype")
+                st.caption("Use this to test where a new player might fit in the lineup before game day.")
 
-        add_col1, add_col2, add_col3, add_col4 = st.columns([1.2, 1.2, 0.8, 0.9])
+            add_col1, add_col2, add_col3, add_col4 = st.columns([1.2, 1.2, 0.8, 0.9])
 
-        with add_col1:
-            new_player_name = st.text_input(
-                "Player name",
-                key="dashboard_new_player_name",
-            )
+            with add_col1:
+                new_player_name = st.text_input(
+                    "Player name",
+                    key="dashboard_new_player_name",
+                )
 
-        archetype_options = [a.value for a in PlayerArchetype if a.value != "unknown"]
-        with add_col2:
-            selected_archetype = st.selectbox(
-                "Archetype",
-                options=archetype_options,
-                key="dashboard_new_player_archetype",
-            )
+            archetype_options = [a.value for a in PlayerArchetype if a.value != "unknown"]
+            with add_col2:
+                selected_archetype = st.selectbox(
+                    "Archetype",
+                    options=archetype_options,
+                    key="dashboard_new_player_archetype",
+                )
 
-        with add_col3:
-            new_player_handedness = st.selectbox(
-                "Handedness",
-                options=["R", "L", "S", "U"],
-                index=3,
-                key="dashboard_new_player_handedness",
-            )
+            with add_col3:
+                new_player_handedness = st.selectbox(
+                    "Handedness",
+                    options=["R", "L", "S", "U"],
+                    index=3,
+                    key="dashboard_new_player_handedness",
+                )
 
-        with add_col4:
-            st.markdown("<div style='height: 1.8rem;'></div>", unsafe_allow_html=True)
-            if st.button("Add Player", use_container_width=True, key="dashboard_add_player_btn"):
-                cleaned_name = new_player_name.strip()
-                if not cleaned_name:
-                    st.error("Please enter a player name.")
-                else:
-                    try:
-                        add_player_from_archetype(
-                            st.session_state.optimizer_session_id,
-                            name=cleaned_name,
-                            archetype=selected_archetype,
-                            handedness=new_player_handedness,
-                        )
-                        st.session_state.coach_lab_workspace_mode = "custom"
-                        clear_lineup_order_widget_state()
-                        st.success(f"Added {cleaned_name} to the roster.")
-                        st.rerun()
-                    except Exception as exc:
-                        st.error(f"Could not add player: {exc}")
+            with add_col4:
+                st.markdown("<div style='height: 1.8rem;'></div>", unsafe_allow_html=True)
+                if st.button("Add Player", use_container_width=True, key="dashboard_add_player_btn"):
+                    cleaned_name = new_player_name.strip()
+                    if not cleaned_name:
+                        st.error("Please enter a player name.")
+                    else:
+                        try:
+                            add_player_from_archetype(
+                                st.session_state.optimizer_session_id,
+                                name=cleaned_name,
+                                archetype=selected_archetype,
+                                handedness=new_player_handedness,
+                            )
+                            st.session_state.coach_lab_workspace_mode = "custom"
+                            clear_lineup_order_widget_state()
+                            st.success(f"Added {cleaned_name} to the roster.")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"Could not add player: {exc}")
+
 
     render_model_limitations_panel()
 
