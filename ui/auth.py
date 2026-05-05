@@ -44,23 +44,13 @@ def render_signed_in_banner() -> None:
         )
         st.session_state.analytics_login_logged = True
 
-    spacer_col, identity_col, logout_col = st.columns(
-        [3, 2.2, 0.55],
-        vertical_alignment="center",
-    )
+    with st.sidebar:
+        st.markdown("---")
+        st.caption("Signed in as")
+        st.caption(f"**{current_user.display_name}**")
+        if current_user.email:
+            st.caption(current_user.email)
 
-    with spacer_col:
-        st.empty()
-
-    with identity_col:
-        st.markdown(
-            f"<div style='text-align:right; font-size:0.78rem; opacity:0.68;'>"
-            f"Signed in as {current_user.display_name} ({current_user.email})"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
-
-    with logout_col:
         if st.button(
             "Log out",
             type="secondary",

@@ -3573,6 +3573,8 @@ def render_coach_lab(
                         slot_number=None,
                     )
 
+        render_model_limitations_panel()
+
         if not editable_profiles:
             st.markdown("### Add your first player")
             st.caption("Choose an archetype, enter a name, and click Add Player to begin building the roster.")
@@ -4268,22 +4270,21 @@ def main() -> None:
     backend_session = get_backend_session()
     ensure_selected_team()
 
-    render_signed_in_banner()
-
     st.title(APP_TITLE)
     st.caption(APP_SUBTITLE)
 
-    render_how_to_use_panel()
+    if not st.session_state.get("coach_usage_panel_dismissed", False):
+        render_how_to_use_panel()
+
     render_team_switcher()
 
     run_settings = render_sidebar(backend_session)
+    render_signed_in_banner()
 
     if not _has_pitcher_matchup_context(run_settings.get("rules_config", {}) or {}):
         st.session_state.matchup_impact_generic_baseline = None
 
     st.session_state.run_settings_cache = run_settings
-
-    render_model_limitations_panel()
 
     existing_results = safe_get_results()
     render_results(existing_results)
