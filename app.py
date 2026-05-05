@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import html
 from pathlib import Path
 from typing import Iterable, Any
 import altair as alt
@@ -20,7 +21,6 @@ from ui.auth import (
 from ui.copy_blocks import (
     render_how_to_use_panel,
     render_model_limitations_panel,
-    render_model_limitations,
 )
 
 from ui.upload_helpers import (
@@ -1523,6 +1523,51 @@ def render_matchup_impact_card(
         f"**Why the lineup may change:**\n"
         f"{bullet_md}"
     )
+
+
+def render_dismissible_coach_onboarding() -> None:
+    """
+    Lightweight, session-only onboarding near the Game Plan area.
+    """
+    if bool(st.session_state.get("coach_onboarding_dismissed", False)):
+        return
+
+    # TODO: Persist dismissal/count per user after adding a user-preferences store.
+    st.session_state["coach_onboarding_view_count"] = (
+        int(st.session_state.get("coach_onboarding_view_count", 0)) + 1
+    )
+
+    with st.container(border=True):
+        header_cols = st.columns([4, 1])
+
+        with header_cols[0]:
+            st.markdown("### How coaches are using this")
+            st.caption(
+                "Use Game Plan to run the big action, review charts first, then fine-tune the roster or batting order in Lineup Builder."
+            )
+
+        with header_cols[1]:
+            if st.button(
+                "Hide this",
+                key="hide_coach_onboarding",
+                use_container_width=True,
+            ):
+                st.session_state["coach_onboarding_dismissed"] = True
+                st.rerun()
+
+        usage_cols = st.columns(3)
+
+        with usage_cols[0]:
+            st.markdown("**1. Load or update roster data**")
+            st.caption("Import GameChanger data or build a manual roster.")
+
+        with usage_cols[1]:
+            st.markdown("**2. Run a Game Plan action**")
+            st.caption("Optimize, simulate your order, or test absent-player scenarios.")
+
+        with usage_cols[2]:
+            st.markdown("**3. Read charts, then adjust**")
+            st.caption("Use Results for the first read, then Lineup Builder for coach edits.")
 
 
 def render_run_section(run_settings: dict) -> None:
@@ -3658,23 +3703,10 @@ def render_coach_lab(
 
     baseline_results = results or st.session_state.get("last_completed_results")
 
-    if baseline_results is not None:
-        render_matchup_impact_card(
-            run_settings=run_settings,
-            optimized_result=baseline_results.optimized,
-            generic_same_lineup_result=st.session_state.get("matchup_impact_generic_baseline"),
-        )
-
     render_custom_lineup_result(
         st.session_state.get("coach_lab_last_custom_eval"),
         optimized=baseline_results.optimized if baseline_results is not None else None,
         original=baseline_results.original if baseline_results is not None else None,
-    )
-
-    st.markdown("")
-    render_coach_lab_comparison_section(
-        results=baseline_results,
-        run_settings=run_settings,
     )
 
     saved_scenario_msgs = st.session_state.get("coach_lab_saved_scenario_messages", [])
@@ -3712,7 +3744,10 @@ def render_coach_footer(results: WorkflowResponseSchema) -> None:
                 st.warning(warning)
 
 
-def render_results(results: WorkflowResponseSchema | None) -> None:
+def render_results(
+    results: WorkflowResponseSchema | None,
+    run_settings: dict,
+) -> None:
     st.markdown("## Results")
     st.caption("Review the latest lineup output, charts, and supporting details.")
 
@@ -3722,23 +3757,37 @@ def render_results(results: WorkflowResponseSchema | None) -> None:
         )
         return
 
-    render_coach_summary(results)
-    render_featured_lineups(results)
+    st.markdown("### Charts and scenario comparison")
+    render_coach_lab_comparison_section(
+        results=results,
+        run_settings=run_settings,
+    )
+
+    render_matchup_impact_card(
+        run_settings=run_settings,
+        optimized_result=results.optimized,
+        generic_same_lineup_result=st.session_state.get("matchup_impact_generic_baseline"),
+    )
+
+    with st.expander("Recommended lineup and key metrics", expanded=True):
+        render_coach_summary(results)
+        st.divider()
+        render_featured_lineups(results)
+
+    st.markdown("### Advanced and player details")
 
     tab_names = [
-        "Charts",
         "Players",
         "Other Options",
-        "Model & Limitations",
         "Advanced",
     ]
 
-    default_tab = st.session_state.get("active_results_tab", "Charts")
+    default_tab = st.session_state.get("active_results_tab", "Players")
     if default_tab not in tab_names:
-        default_tab = "Charts"
+        default_tab = "Players"
 
     selected_tab = st.radio(
-        "Results navigation",
+        "Details navigation",
         options=tab_names,
         horizontal=True,
         label_visibility="collapsed",
@@ -3749,17 +3798,11 @@ def render_results(results: WorkflowResponseSchema | None) -> None:
     st.session_state.active_results_tab = selected_tab
     st.markdown("---")
 
-    if selected_tab == "Charts":
-        render_charts(results)
-
-    elif selected_tab == "Players":
+    if selected_tab == "Players":
         render_player_profiles(results.player_profiles)
 
     elif selected_tab == "Other Options":
         render_leaderboards(results.leaderboards)
-
-    elif selected_tab == "Model & Limitations":
-        render_model_limitations()
 
     elif selected_tab == "Advanced":
         render_roster_summary(results)
@@ -4304,16 +4347,31 @@ def main() -> None:
     backend_session = get_backend_session()
     ensure_selected_team()
 
+    signed_in_email = None
     try:
         from core.auth import get_current_user
 
         current_user = get_current_user()
-        st.sidebar.caption(f"Signed in as {current_user.email}")
+        signed_in_email = current_user.email
     except Exception:
         pass
 
-    st.title(APP_TITLE)
-    st.caption(APP_SUBTITLE)
+    header_cols = st.columns([3, 1])
+    with header_cols[0]:
+        st.title(APP_TITLE)
+        st.caption(APP_SUBTITLE)
+
+    with header_cols[1]:
+        if signed_in_email:
+            st.markdown(
+                (
+                    "<div style='text-align:right; font-size:0.8rem; "
+                    "opacity:0.65; padding-top:0.35rem;'>"
+                    f"Signed in as {html.escape(str(signed_in_email))}"
+                    "</div>"
+                ),
+                unsafe_allow_html=True,
+            )
 
     render_team_switcher()
 
@@ -4329,18 +4387,23 @@ def main() -> None:
     render_additional_gc_data_panel(backend_session)
     st.markdown("")
 
+    render_dismissible_coach_onboarding()
+    st.markdown("")
+
     render_game_plan_section(run_settings)
 
     existing_results = safe_get_results()
-    render_results(existing_results)
+    render_results(existing_results, run_settings)
 
     st.markdown("---")
     render_coach_lab(existing_results, run_settings)
 
     st.markdown("---")
     st.markdown("## Help and model notes")
-    render_how_to_use_panel()
-    render_model_limitations_panel()
+    with st.expander("How to use", expanded=False):
+        render_how_to_use_panel()
+    with st.expander("Model and limitations", expanded=False):
+        render_model_limitations_panel()
 
 
 if __name__ == "__main__":
