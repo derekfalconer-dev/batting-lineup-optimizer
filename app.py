@@ -3054,21 +3054,6 @@ def render_coach_lab(
     results: WorkflowResponseSchema | None,
     run_settings: dict,
 ) -> None:
-    st.caption(
-        "Manage the roster, adjust player traits, optimize the active roster, "
-        "and test the custom batting order currently shown below."
-    )
-
-    with st.expander("What the model is assuming in Lineup Builder", expanded=False):
-        st.markdown(
-            """
-- This is a lineup comparison tool, not an exact score predictor.
-- GameChanger data is used as directional input and can be noisy if scorekeeping is inconsistent.
-- Coach edits and archetype players are meant to help when the imported data is sparse or misleading.
-- The most useful question is usually: **Does this lineup tend to look better than my other options?**
-            """
-        )
-
     editable_profiles = get_editable_roster_for_ui()
 
     benched_player_names = set(get_benched_player_names_for_ui())
@@ -3543,6 +3528,16 @@ def render_coach_lab(
                                 "Most players have strong data behind them, so the imported profiles should be a solid starting point."
                             )
 
+        with st.expander("What the model is assuming in Lineup Builder", expanded=False):
+            st.markdown(
+                """
+- This is a lineup comparison tool, not an exact score predictor.
+- GameChanger data is used as directional input and can be noisy if scorekeeping is inconsistent.
+- Coach edits and archetype players are meant to help when the imported data is sparse or misleading.
+- The most useful question is usually: **Does this lineup tend to look better than my other options?**
+                """
+            )
+
         with st.expander("Active batting order", expanded=True):
             if lineup_profiles:
                 for idx, profile in enumerate(lineup_profiles, start=1):
@@ -3687,39 +3682,6 @@ def render_coach_footer(results: WorkflowResponseSchema) -> None:
 
 
 def render_results(results: WorkflowResponseSchema | None) -> None:
-    st.markdown(
-        """
-    <div style="
-    padding:18px 22px;
-    border-radius:18px;
-    border:1px solid rgba(120,160,255,.28);
-    background: linear-gradient(
-    180deg,
-    rgba(56,109,255,.12),
-    rgba(56,109,255,.04)
-    );
-    margin-bottom:1rem;
-    ">
-    <div style="
-    font-size:2rem;
-    font-weight:800;
-    letter-spacing:.01em;
-    margin-bottom:.35rem;
-    ">
-    ⚾ Lineup Builder
-    </div>
-
-    <div style="
-    font-size:1.02rem;
-    opacity:.88;
-    ">
-    Set up your lineup, then use the action buttons to run scenarios.
-    </div>
-    </div>
-    """,
-        unsafe_allow_html=True,
-    )
-
     render_coach_lab(results, st.session_state.run_settings_cache)
 
     st.markdown("---")
