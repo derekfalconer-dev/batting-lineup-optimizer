@@ -3059,7 +3059,7 @@ def render_coach_lab(
         "and test the custom batting order currently shown below."
     )
 
-    with st.expander("What the model is assuming in Coach Lab", expanded=False):
+    with st.expander("What the model is assuming in Lineup Builder", expanded=False):
         st.markdown(
             """
 - This is a lineup comparison tool, not an exact score predictor.
@@ -3523,7 +3523,7 @@ def render_coach_lab(
                         st.markdown(
                             """
                     **Recommended workflow for low-confidence players**
-                    1. Open that player in Coach Lab  
+                    1. Open that player in Lineup Builder  
                     2. Check whether the imported profile matches what you see in real games  
                     3. Make a small trait edit or swap to a more realistic archetype if needed  
                     4. Re-simulate or re-optimize the lineup  
@@ -3707,14 +3707,14 @@ def render_results(results: WorkflowResponseSchema | None) -> None:
     letter-spacing:.01em;
     margin-bottom:.35rem;
     ">
-    ⚾ Coach Lab
+    ⚾ Lineup Builder
     </div>
 
     <div style="
     font-size:1.02rem;
     opacity:.88;
     ">
-    Build, test, optimize, and compare batting orders using simulation.
+    Set up your lineup, then use the action buttons to run scenarios.
     </div>
     </div>
     """,
