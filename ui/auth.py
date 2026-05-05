@@ -44,53 +44,66 @@ def render_signed_in_banner() -> None:
         )
         st.session_state.analytics_login_logged = True
 
-    with st.container(border=True):
-        left_col, right_col = st.columns([4, 1])
+    spacer_col, identity_col, logout_col = st.columns(
+        [3, 2.2, 0.55],
+        vertical_alignment="center",
+    )
 
-        with left_col:
-            st.caption(
-                f"Signed in as {current_user.display_name} ({current_user.email})"
-            )
+    with spacer_col:
+        st.empty()
 
-        with right_col:
-            if st.button("Log out", use_container_width=True, key="logout_button"):
-                from core.session_manager import get_session_manager
+    with identity_col:
+        st.markdown(
+            f"<div style='text-align:right; font-size:0.78rem; opacity:0.68;'>"
+            f"Signed in as {current_user.display_name} ({current_user.email})"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
 
-                try:
-                    manager = get_session_manager()
-                    manager.flush_session_team(st.session_state.optimizer_session_id)
-                except Exception:
-                    # Logout should still proceed even if the explicit flush fails.
-                    pass
+    with logout_col:
+        if st.button(
+            "Log out",
+            type="secondary",
+            width="content",
+            key="logout_button",
+        ):
+            from core.session_manager import get_session_manager
 
-                # Clear local UI state that should not survive user switching.
-                for key in [
-                    "selected_team_id",
-                    "team_selector_dropdown",
-                    "sync_team_selector_dropdown",
-                    "new_team_name",
-                    "rename_team_name_input",
-                    "show_team_management",
-                    "show_team_loader",
-                    "coach_lab_player_profiles_cache",
-                    "coach_lab_last_custom_eval",
-                    "coach_lab_workspace_mode",
-                    "coach_lab_saved_nudge_messages",
-                    "saved_scenarios_cache",
-                    "scenario_rename_target",
-                    "last_completed_results",
-                    "coach_lab_saved_scenario_messages",
-                    "multi_gc_reconciliation_result",
-                    "multi_gc_final_records",
-                    "multi_gc_uploaded_file_names",
-                    "multi_gc_import_summary",
-                    "multi_gc_manual_merge_message",
-                    "additional_gc_preview",
-                    "additional_gc_uploaded_file_names",
-                    "additional_gc_apply_summary",
-                    "run_status_tile",
-                    "analytics_login_logged",
-                ]:
-                    st.session_state.pop(key, None)
+            try:
+                manager = get_session_manager()
+                manager.flush_session_team(st.session_state.optimizer_session_id)
+            except Exception:
+                # Logout should still proceed even if the explicit flush fails.
+                pass
 
-                st.logout()
+            # Clear local UI state that should not survive user switching.
+            for key in [
+                "selected_team_id",
+                "team_selector_dropdown",
+                "sync_team_selector_dropdown",
+                "new_team_name",
+                "rename_team_name_input",
+                "show_team_management",
+                "show_team_loader",
+                "coach_lab_player_profiles_cache",
+                "coach_lab_last_custom_eval",
+                "coach_lab_workspace_mode",
+                "coach_lab_saved_nudge_messages",
+                "saved_scenarios_cache",
+                "scenario_rename_target",
+                "last_completed_results",
+                "coach_lab_saved_scenario_messages",
+                "multi_gc_reconciliation_result",
+                "multi_gc_final_records",
+                "multi_gc_uploaded_file_names",
+                "multi_gc_import_summary",
+                "multi_gc_manual_merge_message",
+                "additional_gc_preview",
+                "additional_gc_uploaded_file_names",
+                "additional_gc_apply_summary",
+                "run_status_tile",
+                "analytics_login_logged",
+            ]:
+                st.session_state.pop(key, None)
+
+            st.logout()
