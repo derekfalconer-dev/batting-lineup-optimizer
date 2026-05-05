@@ -3117,9 +3117,9 @@ def render_coach_lab(
         st.divider()
 
         with st.container(border=True):
-            st.markdown("### Coach Action")
+            st.markdown("### Game Plan")
             st.caption(
-                "Run lineup analysis first. Then name and save any lineup you want to compare in the charts."
+                "Choose the scenario you want to run for tonight’s game."
             )
 
             render_run_status_tile()
