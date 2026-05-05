@@ -3474,54 +3474,6 @@ def render_coach_lab(
                 unsafe_allow_html=True,
             )
 
-            low_conf_count, medium_conf_count, high_conf_count = build_confidence_summary(editable_profiles)
-
-            if low_conf_count > 0 or medium_conf_count > 0 or high_conf_count > 0:
-                confidence_summary_label = (
-                    f"Roster data confidence: 🔴 Low {low_conf_count} · "
-                    f"🟡 Medium {medium_conf_count} · 🟢 High {high_conf_count}"
-                )
-
-                with st.expander(confidence_summary_label, expanded=False):
-                    st.caption(
-                        "How many players on your roster are this confidence level. Yellow and red players are good candidates for a quick profile check and small coach tweaks before simulating."
-                    )
-
-                    conf_col1, conf_col2, conf_col3 = st.columns(3)
-
-                    with conf_col1:
-                        st.write(f"🔴 Low: {low_conf_count}")
-
-                    with conf_col2:
-                        st.write(f"🟡 Medium: {medium_conf_count}")
-
-                    with conf_col3:
-                        st.write(f"🟢 High: {high_conf_count}")
-
-                    if low_conf_count > 0:
-                        st.markdown(
-                            """
-                    **Recommended workflow for low-confidence players**
-                    1. Open that player in Lineup Builder  
-                    2. Check whether the imported profile matches what you see in real games  
-                    3. Make a small trait edit or swap to a more realistic archetype if needed  
-                    4. Re-simulate or re-optimize the lineup  
-                            """
-                        )
-
-                    elif medium_conf_count > 0:
-                        left, center, right = st.columns([1, 2, 1])
-                        with center:
-                            st.caption(
-                                "Most players currently have moderate sample sizes. A quick inspection of detailed profiles can help you fine tune the lineup before simulating."
-                            )
-
-                    elif high_conf_count > 0:
-                        left, center, right = st.columns([1, 2, 1])
-                        with center:
-                            st.caption(
-                                "Most players have strong data behind them, so the imported profiles should be a solid starting point."
-                            )
 
         with st.expander("Active batting order", expanded=True):
             st.caption(
