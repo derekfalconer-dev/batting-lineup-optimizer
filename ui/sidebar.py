@@ -65,16 +65,29 @@ def render_opponent_scouting_panel() -> None:
     )
 
     team_key = str(st.session_state.get("selected_team_id", "no_team"))
+    active_context = get_active_opponent_context(st.session_state.optimizer_session_id)
+    active_report = (active_context or {}).get("report") or {}
+    active_pitcher = (active_context or {}).get("pitcher") or {}
+    has_usable_maxpreps_context = bool(
+        active_report.get("opponent_report_id") and active_pitcher.get("name")
+    )
+
+    opponent_source_options = ["MaxPreps Report", "Manual Pitcher", "Generic"]
+    default_opponent_source = "MaxPreps Report" if has_usable_maxpreps_context else "Generic"
 
     opponent_source = st.sidebar.radio(
         "Opponent Source",
-        ["MaxPreps Report", "Manual Pitcher", "Generic"],
-        index=0,
+        opponent_source_options,
+        index=opponent_source_options.index(default_opponent_source),
         key=f"opponent_source_{team_key}",
         help=(
             "Use a MaxPreps report when available, create a manual pitcher profile "
             "when you only have scouting notes, or fall back to generic opponent settings."
         ),
+    )
+
+    st.session_state[f"use_opponent_context_{team_key}"] = (
+        opponent_source == "MaxPreps Report" and has_usable_maxpreps_context
     )
 
     if opponent_source == "Generic":
@@ -246,29 +259,9 @@ def render_opponent_scouting_panel() -> None:
         report_by_label[unique_label] = report
 
     active_context = get_active_opponent_context(st.session_state.optimizer_session_id)
-
-    use_opponent_context = st.sidebar.checkbox(
-        "Use opponent scouting report for simulations",
-        value=active_context is not None,
-        key=f"use_opponent_context_{st.session_state.get('selected_team_id', 'no_team')}",
-        help=(
-            "When enabled, the optimizer will use the selected opposing pitcher "
-            "and the opponent defense from this scouting report. Turn this off "
-            "to use generic opponent settings instead."
-        ),
+    use_opponent_context = bool(
+        st.session_state.get(f"use_opponent_context_{team_key}", False)
     )
-
-    st.sidebar.caption(
-        "Checked = use selected pitcher and opponent defense. "
-        "Unchecked = ignore this report and use generic opponent settings below."
-    )
-
-    if not use_opponent_context:
-        st.sidebar.info(
-            "Opponent report is saved, but is not being used for simulations. "
-            "Generic opponent settings below are active."
-        )
-        return
 
     if use_opponent_context and active_context is None and reports:
         latest_report = reports[-1]
@@ -621,7 +614,7 @@ def render_sidebar(session_state: SessionStateSchema) -> dict:
     team_key = str(st.session_state.get("selected_team_id", "no_team"))
     opponent_source = st.session_state.get(
         f"opponent_source_{team_key}",
-        "MaxPreps Report",
+        "Generic",
     )
 
     manual_pitcher_profile = dict(
@@ -630,7 +623,7 @@ def render_sidebar(session_state: SessionStateSchema) -> dict:
     use_opponent_context = bool(
         st.session_state.get(
             f"use_opponent_context_{team_key}",
-            active_opponent_context is not None,
+            False,
         )
     )
 

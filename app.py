@@ -2700,31 +2700,6 @@ def render_coach_lab_comparison_section(
         )
 
     # -----------------------------
-    # Comparison table
-    # -----------------------------
-    st.markdown("#### Comparison table")
-
-    if enough_to_plot:
-        table_rows = build_comparison_table_rows(compare_items)
-
-        pretty_rows = []
-        for row in table_rows:
-            pretty_rows.append(
-                {
-                    "Lineup": row["lineup"],
-                    "Avg Runs": row["avg_runs"],
-                    f"Chance of {row['target_runs']:.0f}+": f"{row['chance_ge_target']:.1%}",
-                    "Median": row["median_runs"],
-                    "P10": row["p10_runs"],
-                    "P90": row["p90_runs"],
-                }
-            )
-
-        st.dataframe(pretty_rows, use_container_width=True, hide_index=True)
-    else:
-        st.caption("No comparison data yet.")
-
-    # -----------------------------
     # Bucket comparison
     # -----------------------------
     with st.expander("Bucket outcomes", expanded=True):
@@ -2787,8 +2762,8 @@ def render_coach_lab_comparison_section(
                     formatted[key] = f"{value:.1%}"
                 pretty_bucket_rows.append(formatted)
 
-            st.markdown("#### Scoring range table")
-            st.dataframe(pretty_bucket_rows, use_container_width=True, hide_index=True)
+            with st.expander("Scoring range table", expanded=False):
+                st.dataframe(pretty_bucket_rows, use_container_width=True, hide_index=True)
         else:
             with st.container(border=True):
                 st.caption("Bucket comparison plot will appear here.")
@@ -2796,8 +2771,8 @@ def render_coach_lab_comparison_section(
                     "Save a lineup scenario, or include the current unsaved custom order, to populate this chart."
                 )
 
-            st.markdown("#### Scoring range table")
-            st.caption("Scoring range table will appear once scenario data is available.")
+            with st.expander("Scoring range table", expanded=False):
+                st.caption("Scoring range table will appear once scenario data is available.")
 
     # -----------------------------
     # Survival curve
@@ -2850,6 +2825,32 @@ def render_coach_lab_comparison_section(
                 st.markdown(
                     "Create and save a scenario, or include the current unsaved custom order, to populate this plot."
                 )
+
+        # -----------------------------
+        # Comparison table
+        # -----------------------------
+        with st.expander("Detailed comparison table", expanded=False):
+            st.markdown("#### Comparison table")
+
+            if enough_to_plot:
+                table_rows = build_comparison_table_rows(compare_items)
+
+                pretty_rows = []
+                for row in table_rows:
+                    pretty_rows.append(
+                        {
+                            "Lineup": row["lineup"],
+                            "Avg Runs": row["avg_runs"],
+                            f"Chance of {row['target_runs']:.0f}+": f"{row['chance_ge_target']:.1%}",
+                            "Median": row["median_runs"],
+                            "P10": row["p10_runs"],
+                            "P90": row["p90_runs"],
+                        }
+                    )
+
+                st.dataframe(pretty_rows, use_container_width=True, hide_index=True)
+            else:
+                st.caption("No comparison data yet.")
 
     st.markdown("---")
     st.markdown("### Signature charts")
@@ -3044,10 +3045,6 @@ def render_custom_lineup_result(
         )
     else:
         c6.metric(f"Current chance of {target_runs:.0f}+", "—")
-
-    st.markdown("#### Current custom batting order")
-    for i, name in enumerate(custom["lineup"], start=1):
-        st.write(f"{i}. {name}")
 
 
 def render_coach_lab(
