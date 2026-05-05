@@ -3528,16 +3528,6 @@ def render_coach_lab(
                                 "Most players have strong data behind them, so the imported profiles should be a solid starting point."
                             )
 
-        with st.expander("What the model is assuming in Lineup Builder", expanded=False):
-            st.markdown(
-                """
-- This is a lineup comparison tool, not an exact score predictor.
-- GameChanger data is used as directional input and can be noisy if scorekeeping is inconsistent.
-- Coach edits and archetype players are meant to help when the imported data is sparse or misleading.
-- The most useful question is usually: **Does this lineup tend to look better than my other options?**
-                """
-            )
-
         with st.expander("Active batting order", expanded=True):
             if lineup_profiles:
                 for idx, profile in enumerate(lineup_profiles, start=1):
@@ -3572,8 +3562,6 @@ def render_coach_lab(
                         is_benched=True,
                         slot_number=None,
                     )
-
-        render_model_limitations_panel()
 
         if not editable_profiles:
             st.markdown("### Add your first player")
@@ -3626,6 +3614,8 @@ def render_coach_lab(
                         st.rerun()
                     except Exception as exc:
                         st.error(f"Could not add player: {exc}")
+
+    render_model_limitations_panel()
 
     baseline_results = results or st.session_state.get("last_completed_results")
 

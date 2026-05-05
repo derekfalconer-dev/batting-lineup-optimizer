@@ -10,6 +10,9 @@ from core.api_service import (
 )
 
 from ui.session_state import reset_team_scoped_ui_state
+from ui.team_entry import (
+    render_team_entry_panel,
+)
 
 
 SAMPLE_TEAM_NAME = "Sample Team"
@@ -494,3 +497,5 @@ def render_team_switcher() -> None:
                         st.rerun()
                     except Exception as exc:
                         st.error(f"Could not delete team: {exc}")
+
+        render_team_entry_panel(session_obj)

@@ -70,8 +70,8 @@ def render_additional_gc_data_panel(session_state: SessionStateSchema) -> None:
     if session_state.data_source not in {"gc", "gc_plus_tweaks", "gc_merged"}:
         return
 
-    st.markdown("")
-    with st.expander("Add additional GameChanger data to this team", expanded=False):
+    with st.container(border=True):
+        st.markdown("### Add additional GameChanger data to this team")
         st.caption(
             "Upload one or more new GameChanger CSV files. "
             "Matched players will merge into the current team. "
@@ -531,53 +531,37 @@ def finalize_multi_gc_import(
 
 
 def render_team_entry_panel(session_state: SessionStateSchema) -> None:
-    from core.session_manager import get_session_manager
-    from core.auth import get_current_user
+    source_label_map = {
+        "gc": "GameChanger roster",
+        "gc_plus_tweaks": "GameChanger roster",
+        "gc_merged": "Merged multi-file GameChanger roster",
+        "manual_archetypes": "Manual roster",
+        "manual_traits": "Manual roster",
+    }
+    source_label = source_label_map.get(
+        session_state.data_source,
+        session_state.data_source or "Not set",
+    )
 
-    manager = get_session_manager()
-    current_user = get_current_user()
+    expander_open = bool(
+        st.session_state.get("show_team_loader", False)
+        or not session_state.data_source
+    )
 
-    team_summaries = manager.list_team_summaries_for_user(current_user.user_id)
-    has_existing_teams = len(team_summaries) > 0
+    with st.expander("Manage Team Data", expanded=expander_open):
+        st.caption(f"Current source: {source_label}")
 
-    header = "Build team, change source, or import additional data"
-    subheader = "Upload more GameChanger files or create a new team"
+        import_summary = st.session_state.get("multi_gc_import_summary")
+        if session_state.data_source == "gc_merged" and import_summary:
+            with st.container(border=True):
+                st.markdown("#### Multi-file import summary")
+                st.caption(
+                    f"Built from {len(import_summary.get('file_names', []))} GameChanger files "
+                    f"into {import_summary.get('final_player_count', 0)} merged players."
+                )
 
-    # Source/change workflow stays available, but collapsed because it is occasional.
-    if session_state.data_source and not st.session_state.get("show_team_loader", True):
-        with st.expander("Current team source / change source", expanded=False):
-            render_team_loaded_next_steps(session_state)
-
-            import_summary = st.session_state.get("multi_gc_import_summary")
-            if session_state.data_source == "gc_merged" and import_summary:
-                with st.container(border=True):
-                    st.markdown("#### Multi-file import summary")
-                    st.caption(
-                        f"Built from {len(import_summary.get('file_names', []))} GameChanger files "
-                        f"into {import_summary.get('final_player_count', 0)} merged players."
-                    )
-
-            if st.button(
-                "Change Team Source",
-                use_container_width=True,
-                key="show_team_loader_button",
-            ):
-                st.session_state.show_team_loader = True
-                bump_team_entry_expander_token()
-                st.rerun()
-
-    expander_open = bool(st.session_state.get("show_team_loader", False))
-    token = team_entry_expander_token()
-    expander_label = header if token % 2 == 0 else f"{header} "
-
-    if has_existing_teams:
-        with st.expander(expander_label, expanded=expander_open):
-            st.caption(subheader)
-            _render_team_entry_body(session_state)
-    else:
-        st.markdown(f"## {header}")
-        st.caption(subheader)
         _render_team_entry_body(session_state)
+        render_additional_gc_data_panel(session_state)
 
 
 def _render_team_entry_body(session_state: SessionStateSchema) -> None:

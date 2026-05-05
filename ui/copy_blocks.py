@@ -3,8 +3,21 @@ import streamlit as st
 
 def render_how_to_use_panel() -> None:
     with st.container(border=True):
-        st.markdown("### How coaches are using this")
-        st.caption("The most common decisions this tool helps with right now.")
+        header_cols = st.columns([1, 0.14], vertical_alignment="center")
+
+        with header_cols[0]:
+            st.markdown("### How coaches are using this")
+            st.caption("The most common decisions this tool helps with right now.")
+
+        with header_cols[1]:
+            if st.button(
+                "Hide tips",
+                key="coach_usage_panel_hide_button",
+                type="secondary",
+                width="stretch",
+            ):
+                st.session_state.coach_usage_panel_dismissed = True
+                st.rerun()
 
         col1, col2, col3, col4, col5 = st.columns(5)
 
@@ -41,9 +54,15 @@ def render_how_to_use_panel() -> None:
 
 
 def render_model_limitations_panel() -> None:
-    with st.expander("Model & Limitations", expanded=False):
+    with st.expander("Model notes & assumptions", expanded=False):
         st.markdown(
             """
+**Lineup Builder assumptions**
+- This is a lineup comparison tool, not an exact score predictor.
+- GameChanger data is used as directional input and can be noisy if scorekeeping is inconsistent.
+- Coach edits and archetype players are meant to help when the imported data is sparse or misleading.
+- The most useful question is usually: **Does this lineup tend to look better than my other options?**
+
 **What this tool is doing**
 - It uses Monte Carlo simulation to play out many versions of the game and estimate run scoring outcomes.
 - It focuses on lineup-level outputs like average runs, median runs, and the chance of scoring at least a target number of runs.
