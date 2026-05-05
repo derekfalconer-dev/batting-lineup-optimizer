@@ -3091,8 +3091,7 @@ def render_coach_lab(
     lineup_profiles = [p for p in active_profiles if p.name in current_lineup_name_set]
     reserve_profiles = [p for p in active_profiles if p.name not in current_lineup_name_set]
 
-    with st.container(border=True):
-        st.markdown("### Roster and lineup workspace")
+    with st.container():
         if not editable_profiles:
             st.warning(
                 "Your roster is empty. Start by adding your first player below."
@@ -3544,40 +3543,40 @@ def render_coach_lab(
                                 "Most players have strong data behind them, so the imported profiles should be a solid starting point."
                             )
 
-        st.markdown("##### Active batting order")
-        if lineup_profiles:
-            for idx, profile in enumerate(lineup_profiles, start=1):
-                render_expandable_player_editor(
-                    profile,
-                    is_benched=False,
-                    slot_number=idx,
-                    current_position=idx,
-                    total_active_players=len(lineup_profiles),
-                )
-        else:
-            st.warning("No active lineup players are available.")
+        with st.expander("Active batting order", expanded=True):
+            if lineup_profiles:
+                for idx, profile in enumerate(lineup_profiles, start=1):
+                    render_expandable_player_editor(
+                        profile,
+                        is_benched=False,
+                        slot_number=idx,
+                        current_position=idx,
+                        total_active_players=len(lineup_profiles),
+                    )
+            else:
+                st.warning("No active lineup players are available.")
 
-        if reserve_profiles:
-            st.markdown("##### Active players outside the current top 9")
-            st.caption("These players are active but not currently in the simulated lineup because continuous batting is off.")
-            for profile in reserve_profiles:
-                current_position = active_profiles.index(profile) + 1
-                render_expandable_player_editor(
-                    profile,
-                    is_benched=False,
-                    slot_number=None,
-                    current_position=current_position,
-                    total_active_players=len(active_profiles),
-                )
+            if reserve_profiles:
+                st.markdown("##### Active players outside the current top 9")
+                st.caption("These players are active but not currently in the simulated lineup because continuous batting is off.")
+                for profile in reserve_profiles:
+                    current_position = active_profiles.index(profile) + 1
+                    render_expandable_player_editor(
+                        profile,
+                        is_benched=False,
+                        slot_number=None,
+                        current_position=current_position,
+                        total_active_players=len(active_profiles),
+                    )
 
-        if benched_profiles:
-            st.markdown("##### Benched players")
-            for profile in benched_profiles:
-                render_expandable_player_editor(
-                    profile,
-                    is_benched=True,
-                    slot_number=None,
-                )
+            if benched_profiles:
+                st.markdown("##### Benched players")
+                for profile in benched_profiles:
+                    render_expandable_player_editor(
+                        profile,
+                        is_benched=True,
+                        slot_number=None,
+                    )
 
         if not editable_profiles:
             st.markdown("### Add your first player")
