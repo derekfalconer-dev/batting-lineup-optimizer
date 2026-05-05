@@ -4285,11 +4285,6 @@ def main() -> None:
 
     render_model_limitations_panel()
 
-    render_team_entry_panel(backend_session)
-
-    render_additional_gc_data_panel(backend_session)
-    st.markdown("")
-
     existing_results = safe_get_results()
     render_results(existing_results)
 
