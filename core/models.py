@@ -121,7 +121,16 @@ class RulesConfig:
     opponent_pitcher_innings_pitched: float | None = None
     opponent_pitcher_batters_faced: int | None = None
 
-    # Derived modifiers
+    # Manual opponent pitcher (coach-defined)
+    use_manual_opponent_pitcher: bool = False
+
+    manual_pitcher_name: str | None = None
+    manual_pitcher_hand: str | None = None  # 'R', 'L', or None
+
+    manual_pitcher_strikeout_multiplier: float = 1.0
+    manual_pitcher_walk_multiplier: float = 1.0
+    manual_pitcher_contact_multiplier: float = 1.0
+    manual_pitcher_power_multiplier: float = 1.0
 
     # Derived modifiers
     contact_multiplier: float = 1.0

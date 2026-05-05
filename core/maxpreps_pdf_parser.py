@@ -58,6 +58,11 @@ class MaxPrepsOpponentReport:
     pitchers: list[MaxPrepsPitchingRow] = field(default_factory=list)
     raw_text: str = ""
 
+    # Parser health / UI diagnostics. These are intentionally lightweight
+    # so imports can succeed with warnings instead of silently failing.
+    parser_warnings: list[str] = field(default_factory=list)
+    parser_stats: dict[str, Any] = field(default_factory=dict)
+
 
 def parse_maxpreps_pdf(pdf_path: str | Path) -> MaxPrepsOpponentReport:
     """
@@ -100,6 +105,8 @@ def report_to_dict(report: MaxPrepsOpponentReport) -> dict[str, Any]:
         "team_batters_faced": report.team_batters_faced,
         "team_oba": report.team_oba,
         "team_obp_allowed": report.team_obp_allowed,
+        "parser_warnings": list(getattr(report, "parser_warnings", []) or []),
+        "parser_stats": dict(getattr(report, "parser_stats", {}) or {}),
         "pitchers": [
             {
                 "number": row.number,
@@ -216,104 +223,319 @@ def _parse_pitching_totals(text: str, report: MaxPrepsOpponentReport) -> None:
 
 
 def _parse_pitching_rows(text: str, report: MaxPrepsOpponentReport) -> None:
+    """
+    Parse MaxPreps pitching rows defensively.
+
+    MaxPreps printable PDFs are only semi-structured:
+    - Pitching can span pages.
+    - Each stat family is printed as a separate table.
+    - PDF text extraction often drops zero-value cells.
+    - Some reports include bogus "N. Player" rows.
+    - Header blocks can repeat.
+
+    Strategy:
+    - Parse all row-like lines after the Pitching heading.
+    - Classify each row by numeric token shape.
+    - Merge fragments by player number + normalized name.
+    - Prefer IP/BF/#P/APP as evidence that the player actually pitched.
+    """
     pitching_section = _section_from(text, "Pitching")
     if not pitching_section:
+        report.pitchers = []
+        report.parser_warnings.append("No Pitching section found in MaxPreps PDF.")
+        report.parser_stats = {
+            "pitching_row_fragments_seen": 0,
+            "pitching_rows_merged": 0,
+            "pitchers_loaded": 0,
+            "skipped_zero_rows": 0,
+            "skipped_placeholder_rows": 0,
+        }
         return
 
-    rows: list[MaxPrepsPitchingRow] = []
+    merged: dict[str, MaxPrepsPitchingRow] = {}
+    fragments_seen = 0
+    skipped_placeholder_rows = 0
+    skipped_zero_rows = 0
+    row_shape_counts: dict[str, int] = {}
 
-    # ONLY parse the reliable "core stat" table (page 5)
-    # Parse the reliable "core stat" table:
-    # # Athlete Name IP H R ER BB K 2B 3B HR BF AB
-    #
-    # MaxPreps sometimes omits zero-value trailing middle columns in PDF text
-    # extraction. Example:
-    #   D. Maya ... 12.1 30 33 21 12 7 2 89 71
-    # means:
-    #   IP=12.1 H=30 R=33 ER=21 BB=12 K=7 2B=2 3B=0 HR=0 BF=89 AB=71
-    #
-    # So we parse the row line and tolerate 9, 10, or 11 numeric stat tokens.
     row_pattern = re.compile(
-        r"^\s*(?P<num>\d+)\s+"
-        r"(?P<name>[A-Z]\.\s+[A-Za-z'’\-\s]+?)\s+\((?P<grade>[^)]+)\)\s+"
+        r"^\s*(?P<num>\d+)?\s*"
+        r"(?P<name>[A-Z]\.\s+[A-Za-z'’\-\s]+?|N\.\s+Player)\s*"
+        r"(?:\((?P<grade>[^)]+)\))?\s+"
         r"(?P<stats>[0-9.\s]+)$",
         re.MULTILINE,
     )
 
     for match in row_pattern.finditer(pitching_section):
+        raw_name = " ".join(match.group("name").strip().split())
+        if raw_name.lower() == "n. player":
+            skipped_placeholder_rows += 1
+            continue
+
+        number = str(match.group("num") or "").strip()
+        grade = match.group("grade").strip() if match.group("grade") else None
         stat_tokens = match.group("stats").split()
 
-        # Need at least: IP H R ER BB K BF AB
-        if len(stat_tokens) < 8:
+        if not stat_tokens:
             continue
 
-        ip = stat_tokens[0]
-        h = stat_tokens[1]
-        r = stat_tokens[2]
-        er = stat_tokens[3]
-        bb = stat_tokens[4]
-        k = stat_tokens[5]
+        fragments_seen += 1
 
-        # Remaining columns are some form of:
-        # full:      2B 3B HR BF AB
-        # common:    2B BF AB              (3B/HR omitted as zero)
-        # possible:  2B 3B BF AB           (HR omitted as zero)
-        remaining = stat_tokens[6:]
+        # Ignore obvious non-pitching tables that can appear before/after Pitching.
+        # Pitching rows are usually 5-11 numeric tokens after name/grade.
+        if len(stat_tokens) < 5 or len(stat_tokens) > 11:
+            continue
 
-        doubles_allowed = 0
-        triples_allowed = 0
-        homers_allowed = 0
-        bf = None
-        ab = None
+        key = _pitcher_key(number, raw_name)
+        row = merged.get(key)
+        if row is None:
+            row = MaxPrepsPitchingRow(
+                number=number,
+                name=raw_name,
+                grade=grade,
+            )
+            merged[key] = row
+        elif not row.grade and grade:
+            row.grade = grade
 
-        if len(remaining) >= 5:
-            doubles_allowed = _safe_int(remaining[0]) or 0
-            triples_allowed = _safe_int(remaining[1]) or 0
-            homers_allowed = _safe_int(remaining[2]) or 0
-            bf = remaining[3]
-            ab = remaining[4]
-        elif len(remaining) == 4:
-            doubles_allowed = _safe_int(remaining[0]) or 0
-            triples_allowed = _safe_int(remaining[1]) or 0
-            homers_allowed = 0
-            bf = remaining[2]
-            ab = remaining[3]
-        elif len(remaining) == 3:
-            doubles_allowed = _safe_int(remaining[0]) or 0
-            triples_allowed = 0
-            homers_allowed = 0
-            bf = remaining[1]
-            ab = remaining[2]
+        shape = _classify_pitching_stat_tokens(stat_tokens)
+        row_shape_counts[shape] = row_shape_counts.get(shape, 0) + 1
+
+        if shape == "summary":
+            _merge_pitching_summary_tokens(row, stat_tokens)
+        elif shape == "core":
+            _merge_pitching_core_tokens(row, stat_tokens)
+        elif shape == "rates":
+            _merge_pitching_rates_tokens(row, stat_tokens)
         else:
+            # Unknown fragments are expected occasionally; do not fail import.
             continue
 
-        row = MaxPrepsPitchingRow(
-            number=match.group("num"),
-            name=" ".join(match.group("name").strip().split()),
-            grade=match.group("grade").strip(),
-            innings_pitched=_parse_innings(ip),
-            hits_allowed=_safe_int(h),
-            runs_allowed=_safe_int(r),
-            earned_runs=_safe_int(er),
-            walks=_safe_int(bb),
-            strikeouts=_safe_int(k),
-            doubles_allowed=doubles_allowed,
-            triples_allowed=triples_allowed,
-            homers_allowed=homers_allowed,
-            batters_faced=_safe_int(bf),
-            at_bats_against=_safe_int(ab),
-        )
-        rows.append(row)
-    # Filter garbage rows (no IP or BF)
-    report.pitchers = [
-        r for r in rows
-        if (r.innings_pitched or 0) > 0 and (r.batters_faced or 0) > 0
-    ]
+    candidates = list(merged.values())
 
-    # Sort by workload (best proxy for likely starter)
-    report.pitchers.sort(
-        key=lambda r: -(r.innings_pitched or 0)
+    pitchers: list[MaxPrepsPitchingRow] = []
+    for row in candidates:
+        if _is_zero_pitching_row(row):
+            skipped_zero_rows += 1
+            continue
+        if _has_pitching_evidence(row):
+            pitchers.append(row)
+
+    pitchers.sort(
+        key=lambda r: (
+            -(r.innings_pitched or 0.0),
+            -(r.batters_faced or 0),
+            -(r.appearances or 0),
+            r.name,
+        )
     )
+
+    report.pitchers = pitchers
+
+    if not pitchers:
+        report.parser_warnings.append(
+            "No usable pitcher rows were found. The PDF may use a MaxPreps layout this parser does not recognize yet."
+        )
+
+    if row_shape_counts.get("core", 0) == 0:
+        report.parser_warnings.append(
+            "No IP/H/R/ER/BB/K pitching table was detected. Pitcher profiles may be incomplete."
+        )
+
+    report.parser_stats = {
+        "pitching_row_fragments_seen": fragments_seen,
+        "pitching_rows_merged": len(merged),
+        "pitchers_loaded": len(pitchers),
+        "skipped_zero_rows": skipped_zero_rows,
+        "skipped_placeholder_rows": skipped_placeholder_rows,
+        "row_shape_counts": row_shape_counts,
+    }
+
+
+def _classify_pitching_stat_tokens(tokens: list[str]) -> str:
+    """
+    Guess which MaxPreps pitching table a row came from.
+
+    Known table families:
+    1. Summary:
+       ERA W L W% APP GS CG SO SV NH PG
+       Often 5-11 tokens due to omitted blank/zero cells.
+
+    2. Core:
+       IP H R ER BB K 2B 3B HR BF AB
+       Usually has 8-11 tokens. First token may be baseball innings notation.
+
+    3. Rates:
+       OBA OBP WP HBP SF SH/B #P BK PO SB
+       Usually starts with decimal-looking OBA/OBP or zeros, contains #P near the end.
+    """
+    if not tokens:
+        return "unknown"
+
+    # Rates table usually starts with OBA/OBP decimals like .219 .271,
+    # or 0 0 for players with no pitching.
+    if len(tokens) >= 6 and (_looks_like_rate(tokens[0]) or tokens[0] == "0") and (_looks_like_rate(tokens[1]) or tokens[1] == "0"):
+        # If one of the later tokens is a large pitch count, this is likely the rates/#P table.
+        later_ints = [_safe_int(tok) or 0 for tok in tokens[2:]]
+        if any(value >= 20 for value in later_ints) or len(tokens) >= 8:
+            return "rates"
+
+    # Core table begins with IP, then H/R/ER/BB/K. It often has BF/AB as
+    # the last two values, and those are usually larger than early stat cells.
+    if len(tokens) >= 8:
+        ip = _parse_innings(tokens[0])
+        numeric = [_safe_float(tok) for tok in tokens]
+        if ip is not None and all(value is not None for value in numeric[:6]):
+            last_two = [_safe_int(tokens[-2]) or 0, _safe_int(tokens[-1]) or 0]
+            if max(last_two) >= 10:
+                return "core"
+
+    # Summary table begins with ERA and then W/L/W%/APP/GS...
+    # It is the fallback for shorter pitching fragments.
+    if len(tokens) >= 5:
+        return "summary"
+
+    return "unknown"
+
+
+def _merge_pitching_summary_tokens(row: MaxPrepsPitchingRow, tokens: list[str]) -> None:
+    """
+    Merge ERA/W/L/APP/GS from the summary table.
+
+    MaxPreps can omit W% or trailing zero columns, so this is intentionally
+    conservative. APP/GS are useful for scouting, but IP/BF remain the
+    authoritative workload signal.
+    """
+    if not tokens:
+        return
+
+    row.era = _safe_float(tokens[0]) if row.era is None else row.era
+
+    if len(tokens) >= 3:
+        row.wins = _safe_int(tokens[1]) if row.wins is None else row.wins
+        row.losses = _safe_int(tokens[2]) if row.losses is None else row.losses
+
+    # After ERA W L, there may or may not be W%.
+    # If token 3 looks like a percentage/rate, APP is token 4.
+    # Otherwise APP is token 3.
+    app_idx = None
+    if len(tokens) >= 5 and _looks_like_rate(tokens[3]):
+        app_idx = 4
+    elif len(tokens) >= 4:
+        app_idx = 3
+
+    if app_idx is not None and app_idx < len(tokens):
+        row.appearances = _safe_int(tokens[app_idx]) if row.appearances is None else row.appearances
+
+    gs_idx = app_idx + 1 if app_idx is not None else None
+    if gs_idx is not None and gs_idx < len(tokens):
+        row.games_started = _safe_int(tokens[gs_idx]) if row.games_started is None else row.games_started
+
+
+def _merge_pitching_core_tokens(row: MaxPrepsPitchingRow, tokens: list[str]) -> None:
+    """
+    Merge IP/H/R/ER/BB/K/2B/3B/HR/BF/AB.
+
+    Handles missing zero columns by anchoring BF/AB to the last two tokens.
+    """
+    if len(tokens) < 8:
+        return
+
+    row.innings_pitched = _parse_innings(tokens[0])
+    row.hits_allowed = _safe_int(tokens[1])
+    row.runs_allowed = _safe_int(tokens[2])
+    row.earned_runs = _safe_int(tokens[3])
+    row.walks = _safe_int(tokens[4])
+    row.strikeouts = _safe_int(tokens[5])
+
+    row.batters_faced = _safe_int(tokens[-2])
+    row.at_bats_against = _safe_int(tokens[-1])
+
+    middle = tokens[6:-2]
+
+    # Known full shape: 2B 3B HR BF AB
+    # Common omitted-zero shapes:
+    #   2B BF AB
+    #   2B 3B BF AB
+    #   2B 3B HR BF AB
+    row.doubles_allowed = _safe_int(middle[0]) if len(middle) >= 1 else 0
+    row.triples_allowed = _safe_int(middle[1]) if len(middle) >= 2 else 0
+    row.homers_allowed = _safe_int(middle[2]) if len(middle) >= 3 else 0
+
+    if row.doubles_allowed is None:
+        row.doubles_allowed = 0
+    if row.triples_allowed is None:
+        row.triples_allowed = 0
+    if row.homers_allowed is None:
+        row.homers_allowed = 0
+
+
+def _merge_pitching_rates_tokens(row: MaxPrepsPitchingRow, tokens: list[str]) -> None:
+    """
+    Merge OBA/OBP/WP/HBP/#P from the final pitching table.
+
+    Header is:
+      OBA OBP WP HBP SF SH/B #P BK PO SB
+
+    PDF extraction sometimes drops trailing zeros, but #P is usually the
+    largest later value, so we parse the common positions and fall back
+    to the largest plausible pitch-count token.
+    """
+    if len(tokens) < 2:
+        return
+
+    row.opponent_ba = _parse_decimal(tokens[0]) if row.opponent_ba is None else row.opponent_ba
+    row.opponent_obp = _parse_decimal(tokens[1]) if row.opponent_obp is None else row.opponent_obp
+
+    if len(tokens) >= 3:
+        row.wild_pitches = _safe_int(tokens[2]) if row.wild_pitches is None else row.wild_pitches
+    if len(tokens) >= 4:
+        row.hbp = _safe_int(tokens[3]) if row.hbp is None else row.hbp
+
+    # Normal position is token 6: OBA OBP WP HBP SF SH/B #P ...
+    pitch_count = None
+    if len(tokens) >= 7:
+        pitch_count = _safe_int(tokens[6])
+
+    if pitch_count is None or pitch_count <= 0:
+        later_values = [_safe_int(tok) or 0 for tok in tokens[2:]]
+        plausible = [value for value in later_values if value >= 20]
+        if plausible:
+            pitch_count = max(plausible)
+
+    if pitch_count is not None:
+        row.pitches = pitch_count
+
+
+def _has_pitching_evidence(row: MaxPrepsPitchingRow) -> bool:
+    return (
+        float(row.innings_pitched or 0.0) > 0.0
+        or int(row.batters_faced or 0) > 0
+        or int(row.pitches or 0) > 0
+        or int(row.appearances or 0) > 0
+    )
+
+
+def _is_zero_pitching_row(row: MaxPrepsPitchingRow) -> bool:
+    return (
+        float(row.innings_pitched or 0.0) <= 0.0
+        and int(row.batters_faced or 0) <= 0
+        and int(row.pitches or 0) <= 0
+        and int(row.appearances or 0) <= 0
+        and int(row.strikeouts or 0) <= 0
+        and int(row.walks or 0) <= 0
+    )
+
+
+def _looks_like_rate(value: str) -> bool:
+    cleaned = str(value).strip()
+    if cleaned.startswith("."):
+        return True
+    try:
+        parsed = float(cleaned)
+    except ValueError:
+        return False
+    return 0.0 <= parsed <= 1.0
 
 
 def _section_from(text: str, heading: str) -> str:

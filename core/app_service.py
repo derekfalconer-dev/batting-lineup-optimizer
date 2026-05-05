@@ -456,7 +456,12 @@ def _apply_environment_to_players(
         player.p_bb *= rules.walk_multiplier
         player.p_so *= rules.strikeout_multiplier
 
-        if getattr(rules, "use_opponent_scouting", False):
+        use_pitcher = (
+                getattr(rules, "use_opponent_scouting", False)
+                or getattr(rules, "use_manual_opponent_pitcher", False)
+        )
+
+        if use_pitcher:
             matchup = _personalized_pitcher_effects(player, rules)
 
             player.p_1b *= matchup["contact"]

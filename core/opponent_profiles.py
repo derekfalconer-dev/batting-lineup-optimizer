@@ -153,6 +153,8 @@ class OpponentTeamProfile:
     team_bb_rate: float = 0.0
 
     pitchers: list[OpponentPitcherProfile] = field(default_factory=list)
+    parser_warnings: list[str] = field(default_factory=list)
+    parser_stats: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -170,6 +172,8 @@ class OpponentTeamProfile:
             "team_batters_faced": self.team_batters_faced,
             "team_k_rate": self.team_k_rate,
             "team_bb_rate": self.team_bb_rate,
+            "parser_warnings": list(self.parser_warnings),
+            "parser_stats": dict(self.parser_stats),
             "pitchers": [p.as_dict() for p in self.pitchers],
         }
 
@@ -214,6 +218,8 @@ def build_opponent_team_profile(
         team_batters_faced=report.team_batters_faced,
         team_k_rate=team_k_rate,
         team_bb_rate=team_bb_rate,
+        parser_warnings=list(getattr(report, "parser_warnings", []) or []),
+        parser_stats=dict(getattr(report, "parser_stats", {}) or {}),
         pitchers=[
             build_pitcher_profile(
                 row,
@@ -597,3 +603,74 @@ def _pitching_row_to_dict(row: MaxPrepsPitchingRow) -> dict[str, Any]:
         "hbp": row.hbp,
         "pitches": row.pitches,
     }
+
+
+def build_manual_pitcher_profile(
+    *,
+    name: str,
+    hand: str | None,
+    velo: str,
+    k_rate: str,
+    bb_rate: str,
+    contact: str,
+) -> OpponentPitcherProfile:
+    """
+    Convert simple coach inputs into model multipliers.
+    """
+
+    k_map = {
+        "Low": 0.78,
+        "Average": 1.0,
+        "High": 1.32,
+        "Elite": 1.58,
+    }
+
+    bb_map = {
+        "Low": 0.72,
+        "Average": 1.0,
+        "High": 1.32,
+        "Wild": 1.65,
+    }
+
+    contact_map = {
+        "Weak": (0.84, 0.86),
+        "Average": (1.0, 1.0),
+        "Hard": (1.14, 1.22),
+    }
+
+    # --- Velo nudges (small effect) ---
+    velo_adj = {
+        "Soft": -0.1,
+        "Average": 0.0,
+        "Hard": 0.1,
+        "Very Hard": 0.2,
+    }
+
+    strikeout_multiplier = k_map.get(k_rate, 1.0) + velo_adj.get(velo, 0.0)
+    walk_multiplier = bb_map.get(bb_rate, 1.0)
+
+    contact_multiplier, power_multiplier = contact_map.get(contact, (1.0, 1.0))
+
+    strikeout_multiplier = round(_clamp(strikeout_multiplier, 0.70, 1.85), 3)
+    walk_multiplier = round(_clamp(walk_multiplier, 0.65, 1.85), 3)
+    contact_multiplier = round(_clamp(contact_multiplier, 0.76, 1.22), 3)
+    power_multiplier = round(_clamp(power_multiplier, 0.78, 1.30), 3)
+
+    label = f"{velo} {hand or ''}HP | {k_rate} K | {bb_rate} BB"
+
+    profile = OpponentPitcherProfile(
+        name=name or "Manual Pitcher",
+        strikeout_multiplier=strikeout_multiplier,
+        walk_multiplier=walk_multiplier,
+        contact_multiplier=contact_multiplier,
+        power_multiplier=power_multiplier,
+        label=label,
+        confidence="Manual",
+    )
+
+    profile.scouting_note = (
+        f"{velo} velo, {k_rate} strikeout profile, {bb_rate} control, "
+        f"{contact.lower()} contact allowed."
+    )
+
+    return profile

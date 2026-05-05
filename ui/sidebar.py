@@ -20,6 +20,8 @@ from core.api_service import (
     delete_opponent_report,
 )
 
+from core.opponent_profiles import build_manual_pitcher_profile
+
 
 def get_saved_rules_for_active_team() -> tuple[str, dict]:
     try:
@@ -62,6 +64,110 @@ def render_opponent_scouting_panel() -> None:
         "Import a MaxPreps opponent report, then select the pitcher you expect to face."
     )
 
+    team_key = str(st.session_state.get("selected_team_id", "no_team"))
+
+    opponent_source = st.sidebar.radio(
+        "Opponent Source",
+        ["MaxPreps Report", "Manual Pitcher", "Generic"],
+        index=0,
+        key=f"opponent_source_{team_key}",
+        help=(
+            "Use a MaxPreps report when available, create a manual pitcher profile "
+            "when you only have scouting notes, or fall back to generic opponent settings."
+        ),
+    )
+
+    if opponent_source == "Generic":
+        st.sidebar.info("Using generic opponent settings below.")
+        return
+
+    if opponent_source == "Manual Pitcher":
+        st.sidebar.markdown("### 🎯 Manual Pitcher")
+
+        manual_name = st.sidebar.text_input(
+            "Pitcher Name",
+            value="Manual Pitcher",
+            key=f"manual_pitcher_name_{team_key}",
+        )
+
+        manual_hand = st.sidebar.selectbox(
+            "Throws",
+            ["R", "L", "Unknown"],
+            index=0,
+            key=f"manual_pitcher_hand_{team_key}",
+        )
+
+        manual_velo = st.sidebar.selectbox(
+            "Velocity",
+            ["Soft", "Average", "Hard", "Very Hard"],
+            index=1,
+            key=f"manual_pitcher_velo_{team_key}",
+        )
+
+        manual_k_rate = st.sidebar.selectbox(
+            "Strikeout Ability",
+            ["Low", "Average", "High", "Elite"],
+            index=1,
+            key=f"manual_pitcher_k_rate_{team_key}",
+        )
+
+        manual_bb_rate = st.sidebar.selectbox(
+            "Control / Walk Rate",
+            ["Low", "Average", "High", "Wild"],
+            index=1,
+            key=f"manual_pitcher_bb_rate_{team_key}",
+        )
+
+        manual_contact = st.sidebar.selectbox(
+            "Contact Allowed",
+            ["Weak", "Average", "Hard"],
+            index=1,
+            key=f"manual_pitcher_contact_{team_key}",
+        )
+
+        manual_profile = build_manual_pitcher_profile(
+            name=manual_name,
+            hand=None if manual_hand == "Unknown" else manual_hand,
+            velo=manual_velo,
+            k_rate=manual_k_rate,
+            bb_rate=manual_bb_rate,
+            contact=manual_contact,
+        )
+
+        st.session_state[f"manual_opponent_pitcher_profile_{team_key}"] = manual_profile.as_dict()
+
+        st.sidebar.markdown(
+            f"""
+            <div style="
+                border: 1px solid rgba(128,128,128,.25);
+                border-radius: .65rem;
+                padding: .65rem .75rem;
+                margin: .5rem 0 .75rem 0;
+                background: rgba(128,128,128,.06);
+            ">
+                <div style="font-size:.78rem; opacity:.72; font-weight:700;">
+                    Manual Pitcher
+                </div>
+                <div style="font-size:1rem; font-weight:800; margin-top:.1rem;">
+                    {manual_profile.label}
+                </div>
+                <div style="font-size:.82rem; margin-top:.35rem; opacity:.85;">
+                    {manual_profile.scouting_note}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        with st.sidebar.expander("Manual pitcher model impact", expanded=False):
+            st.write(f"Strikeouts: x{manual_profile.strikeout_multiplier:.2f}")
+            st.write(f"Walks: x{manual_profile.walk_multiplier:.2f}")
+            st.write(f"Contact: x{manual_profile.contact_multiplier:.2f}")
+            st.write(f"Power: x{manual_profile.power_multiplier:.2f}")
+
+        return
+
+    # MaxPreps Report mode continues below.
     uploaded_pdf = st.sidebar.file_uploader(
         "MaxPreps PDF",
         type=["pdf"],
@@ -91,6 +197,17 @@ def render_opponent_scouting_panel() -> None:
                     f"Imported {payload.get('team_name', 'opponent')} "
                     f"with {len(payload.get('pitchers', []) or [])} pitcher profiles."
                 )
+
+                parser_warnings = list(payload.get("parser_warnings", []) or [])
+                parser_stats = dict(payload.get("parser_stats", {}) or {})
+
+                if parser_warnings:
+                    st.sidebar.warning("Imported with parser warnings: " + " ".join(str(w) for w in parser_warnings))
+
+                if parser_stats:
+                    with st.sidebar.expander("Parser details", expanded=False):
+                        st.json(parser_stats)
+
                 st.rerun()
 
             except Exception as exc:
@@ -245,23 +362,27 @@ def render_opponent_scouting_panel() -> None:
             except Exception as exc:
                 st.error(f"Could not delete opponent report: {exc}")
 
+    parser_warnings = list(selected_report.get("parser_warnings", []) or [])
+    parser_stats = dict(selected_report.get("parser_stats", {}) or {})
+
+    if parser_warnings:
+        st.sidebar.warning(
+            "Parser warning: " + " ".join(str(w) for w in parser_warnings)
+        )
+
+    with st.sidebar.expander("Opponent report parser details", expanded=False):
+        if parser_stats:
+            st.json(parser_stats)
+        else:
+            st.caption("No parser diagnostics saved for this report.")
+
     if not pitchers:
-        st.sidebar.warning("This opponent report has no pitcher profiles.")
+        st.sidebar.warning(
+            "This opponent report has no pitcher profiles. "
+            "Delete it and re-import the PDF after parser fixes."
+        )
         return
 
-    # Deduplicate pitcher names in case a MaxPreps PDF table split causes
-    # the same pitcher to be parsed more than once.
-    deduped_pitchers = []
-    seen_pitcher_names = set()
-
-    for pitcher in pitchers:
-        pitcher_name = str(pitcher.get("name", "Unknown pitcher"))
-        if pitcher_name in seen_pitcher_names:
-            continue
-        seen_pitcher_names.add(pitcher_name)
-        deduped_pitchers.append(pitcher)
-
-    pitchers = deduped_pitchers
     pitcher_names = [str(p.get("name", "Unknown pitcher")) for p in pitchers]
 
     default_pitcher_index = 0
@@ -498,6 +619,14 @@ def render_sidebar(session_state: SessionStateSchema) -> dict:
     )
 
     team_key = str(st.session_state.get("selected_team_id", "no_team"))
+    opponent_source = st.session_state.get(
+        f"opponent_source_{team_key}",
+        "MaxPreps Report",
+    )
+
+    manual_pitcher_profile = dict(
+        st.session_state.get(f"manual_opponent_pitcher_profile_{team_key}", {}) or {}
+    )
     use_opponent_context = bool(
         st.session_state.get(
             f"use_opponent_context_{team_key}",
@@ -505,10 +634,10 @@ def render_sidebar(session_state: SessionStateSchema) -> dict:
         )
     )
 
-    if not use_opponent_context:
+    if opponent_source != "MaxPreps Report" or not use_opponent_context:
         active_opponent_context = None
 
-    if not active_opponent_context:
+    if not active_opponent_context and opponent_source != "Manual Pitcher":
         st.sidebar.markdown("## ⚙️ Opponent Context")
 
         opposing_pitching_label = st.sidebar.selectbox(
@@ -531,7 +660,8 @@ def render_sidebar(session_state: SessionStateSchema) -> dict:
             ["Weak", "Average", "Strong"],
             index=1,
         )
-    else:
+
+    elif active_opponent_context:
         pitcher = active_opponent_context.get("pitcher") or {}
         report = active_opponent_context.get("report") or {}
 
@@ -542,6 +672,14 @@ def render_sidebar(session_state: SessionStateSchema) -> dict:
 
         st.sidebar.caption(
             "Using imported opponent scouting report instead of manual opponent controls."
+        )
+
+    else:
+        opposing_pitching_label = "Balanced"
+        opponent_level_label = "Average"
+
+        st.sidebar.caption(
+            "Using manually defined opposing pitcher instead of generic opponent controls."
         )
 
     st.sidebar.markdown("---")
@@ -675,6 +813,13 @@ def render_sidebar(session_state: SessionStateSchema) -> dict:
         "opposing_pitching": opposing_pitching_lookup[opposing_pitching_label],
         "opponent_level": opponent_level_lookup[opponent_level_label],
         "use_opponent_scouting": bool(active_opponent_context),
+        "use_manual_opponent_pitcher": bool(opponent_source == "Manual Pitcher" and manual_pitcher_profile),
+        "manual_pitcher_name": None,
+        "manual_pitcher_hand": None,
+        "manual_pitcher_strikeout_multiplier": 1.0,
+        "manual_pitcher_walk_multiplier": 1.0,
+        "manual_pitcher_contact_multiplier": 1.0,
+        "manual_pitcher_power_multiplier": 1.0,
         "opponent_pitcher_name": None,
         "opponent_pitcher_label": None,
         "opponent_pitcher_strikeout_multiplier": 1.0,
@@ -715,6 +860,35 @@ def render_sidebar(session_state: SessionStateSchema) -> dict:
         rules_config["opponent_pitcher_sample_size"] = active_pitcher.get("confidence")
         rules_config["opponent_pitcher_innings_pitched"] = active_pitcher.get("innings_pitched")
         rules_config["opponent_pitcher_batters_faced"] = active_pitcher.get("batters_faced")
+
+    elif opponent_source == "Manual Pitcher" and manual_pitcher_profile:
+        rules_config["use_opponent_scouting"] = False
+        rules_config["use_manual_opponent_pitcher"] = True
+
+        rules_config["manual_pitcher_name"] = manual_pitcher_profile.get("name")
+        rules_config["manual_pitcher_hand"] = manual_pitcher_profile.get("hand")
+
+        rules_config["manual_pitcher_strikeout_multiplier"] = float(
+            manual_pitcher_profile.get("strikeout_multiplier", 1.0) or 1.0
+        )
+        rules_config["manual_pitcher_walk_multiplier"] = float(
+            manual_pitcher_profile.get("walk_multiplier", 1.0) or 1.0
+        )
+        rules_config["manual_pitcher_contact_multiplier"] = float(
+            manual_pitcher_profile.get("contact_multiplier", 1.0) or 1.0
+        )
+        rules_config["manual_pitcher_power_multiplier"] = float(
+            manual_pitcher_profile.get("power_multiplier", 1.0) or 1.0
+        )
+
+        # Reuse the existing simulator-facing imported pitcher fields.
+        rules_config["opponent_pitcher_name"] = manual_pitcher_profile.get("name")
+        rules_config["opponent_pitcher_label"] = manual_pitcher_profile.get("label")
+        rules_config["opponent_pitcher_strikeout_multiplier"] = rules_config["manual_pitcher_strikeout_multiplier"]
+        rules_config["opponent_pitcher_walk_multiplier"] = rules_config["manual_pitcher_walk_multiplier"]
+        rules_config["opponent_pitcher_contact_multiplier"] = rules_config["manual_pitcher_contact_multiplier"]
+        rules_config["opponent_pitcher_power_multiplier"] = rules_config["manual_pitcher_power_multiplier"]
+        rules_config["opponent_pitcher_sample_size"] = "Manual"
 
     saved_team_rules_config = {
         "innings": int(innings_per_game),

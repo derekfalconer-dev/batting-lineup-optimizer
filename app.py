@@ -1352,6 +1352,13 @@ def render_coach_lab_comparison_charts(
     st.dataframe(bucket_rows, use_container_width=True, hide_index=True)
 
 
+def _has_pitcher_matchup_context(rules_config: dict) -> bool:
+    return bool(
+        rules_config.get("use_opponent_scouting")
+        or rules_config.get("use_manual_opponent_pitcher")
+    )
+
+
 def _build_generic_rules_for_matchup_baseline(rules_config: dict) -> dict:
     """
     Return a generic-opponent version of the current rules.
@@ -1362,6 +1369,15 @@ def _build_generic_rules_for_matchup_baseline(rules_config: dict) -> dict:
     generic = dict(rules_config or {})
 
     generic["use_opponent_scouting"] = False
+    generic["use_manual_opponent_pitcher"] = False
+
+    generic["manual_pitcher_name"] = None
+    generic["manual_pitcher_hand"] = None
+    generic["manual_pitcher_strikeout_multiplier"] = 1.0
+    generic["manual_pitcher_walk_multiplier"] = 1.0
+    generic["manual_pitcher_contact_multiplier"] = 1.0
+    generic["manual_pitcher_power_multiplier"] = 1.0
+
     generic["opponent_pitcher_name"] = None
     generic["opponent_pitcher_label"] = None
     generic["opponent_pitcher_strikeout_multiplier"] = 1.0
@@ -1384,7 +1400,7 @@ def render_matchup_impact_card(
 ) -> None:
     rules_config = run_settings.get("rules_config", {}) or {}
 
-    if not rules_config.get("use_opponent_scouting"):
+    if not _has_pitcher_matchup_context(rules_config):
         return
 
     pitcher_name = rules_config.get("opponent_pitcher_name") or "selected pitcher"
@@ -1394,10 +1410,16 @@ def render_matchup_impact_card(
     pitcher_ip = rules_config.get("opponent_pitcher_innings_pitched")
     pitcher_bf = rules_config.get("opponent_pitcher_batters_faced")
 
+    is_manual_pitcher = bool(rules_config.get("use_manual_opponent_pitcher"))
+
+    if is_manual_pitcher:
+        pitcher_sample_size = "Manual"
+
     sample_label = {
         "Low": "small",
         "Medium": "medium",
         "High": "large",
+        "Manual": "coach-entered",
     }.get(str(pitcher_sample_size), "")
 
     sample_note = ""
@@ -1413,6 +1435,12 @@ def render_matchup_impact_card(
                 f"\n\n⚠️ **Sample-size note:** {sample_label or 'limited'} data sample. "
                 "Use this as directional scouting and combine it with coach judgment."
             )
+
+    if is_manual_pitcher:
+        sample_note = (
+            "\n\n📝 **Manual scouting note:** this profile is based on coach-entered "
+            "pitcher traits, not imported stats."
+        )
 
     matchup_mean = None
 
@@ -1458,12 +1486,28 @@ def render_matchup_impact_card(
 
     if kx >= 1.25:
         bullets.append("Contact bats gain value because this pitcher creates extra strikeout pressure.")
+    elif kx <= 0.85:
+        bullets.append("More hitters can put the ball in play because this pitcher has lower strikeout pressure.")
+
     if bbx <= 0.80:
         bullets.append("Walk-reliant hitters lose some value because this pitcher limits free passes.")
     elif bbx >= 1.20:
         bullets.append("Patient hitters gain value because this pitcher is likely to give away baserunners.")
+
     if cx <= 0.90:
         bullets.append("Low-contact / high-chase bats are more exposed in this matchup.")
+    elif cx >= 1.10:
+        bullets.append("Contact-oriented hitters may benefit because this profile allows more balls in play.")
+
+    px = float(rules_config.get("opponent_pitcher_power_multiplier", 1.0) or 1.0)
+    if px <= 0.90:
+        bullets.append("Power may be slightly muted, so stringing quality at-bats together matters more.")
+    elif px >= 1.12:
+        bullets.append("Damage bats gain value because this profile allows harder contact.")
+
+    if is_manual_pitcher:
+        bullets.append(
+            "Manual scouting is treated as coach intelligence, so re-run if your read on the pitcher changes.")
 
     if not bullets:
         bullets.append("The lineup stays close to normal because this pitcher profile is fairly neutral.")
@@ -1501,10 +1545,14 @@ def render_run_section(run_settings: dict) -> None:
             st.write(f"Scoring goal: **{run_settings['target_runs']:.1f} runs per game**")
 
             rules_context = run_settings.get("rules_config", {})
-            if rules_context.get("use_opponent_scouting"):
+            if _has_pitcher_matchup_context(rules_context):
                 pitcher_name = rules_context.get("opponent_pitcher_name") or "selected pitcher"
                 pitcher_label = rules_context.get("opponent_pitcher_label") or "opponent profile"
-                st.write(f"Opponent scouting: **{pitcher_name}** — {pitcher_label}")
+
+                if rules_context.get("use_manual_opponent_pitcher"):
+                    st.write(f"Manual opponent pitcher: **{pitcher_name}** — {pitcher_label}")
+                else:
+                    st.write(f"Opponent scouting: **{pitcher_name}** — {pitcher_label}")
 
         with status_col2:
             run_clicked = st.button(
@@ -1549,7 +1597,7 @@ def render_run_section(run_settings: dict) -> None:
                     try:
                         rules_config = run_settings.get("rules_config", {}) or {}
 
-                        if rules_config.get("use_opponent_scouting"):
+                        if _has_pitcher_matchup_context(rules_config):
                             generic_rules_config = _build_generic_rules_for_matchup_baseline(rules_config)
 
                             generic_same_lineup_result = evaluate_custom_lineup(
@@ -3129,7 +3177,7 @@ def render_coach_lab(
                             generic_same_lineup_result = None
                             rules_config = run_settings.get("rules_config", {}) or {}
 
-                            if rules_config.get("use_opponent_scouting"):
+                            if _has_pitcher_matchup_context(rules_config):
                                 try:
                                     generic_rules_config = _build_generic_rules_for_matchup_baseline(rules_config)
 
@@ -4269,7 +4317,7 @@ def main() -> None:
 
     run_settings = render_sidebar(backend_session)
 
-    if not run_settings.get("rules_config", {}).get("use_opponent_scouting"):
+    if not _has_pitcher_matchup_context(run_settings.get("rules_config", {}) or {}):
         st.session_state.matchup_impact_generic_baseline = None
 
     st.session_state.run_settings_cache = run_settings

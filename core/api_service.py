@@ -579,6 +579,22 @@ def import_opponent_maxpreps_pdf(
     opponent_profile = build_opponent_team_profile(report)
 
     payload = opponent_profile.as_dict()
+    pitchers = list(payload.get("pitchers", []) or [])
+
+    if not pitchers:
+        parser_warnings = list(payload.get("parser_warnings", []) or [])
+        parser_stats = dict(payload.get("parser_stats", {}) or {})
+        detail = ""
+        if parser_warnings:
+            detail = " " + " ".join(str(w) for w in parser_warnings)
+        elif parser_stats:
+            detail = f" Parser stats: {parser_stats}"
+
+        raise ValueError(
+            "Opponent report imported, but no usable pitcher profiles were found."
+            f"{detail}"
+        )
+
     report_id = uuid4().hex[:12]
 
     payload.update(
@@ -592,23 +608,39 @@ def import_opponent_maxpreps_pdf(
 
     team = manager.get_workspace_team_for_session(session_id)
 
-    # Replace same source file import if re-imported; otherwise append.
+    # Replace likely same report if re-imported; otherwise append.
+    # This prevents stale/broken imports from stacking when a coach retries
+    # the same opponent with a cleaned or newer PDF.
     existing_reports = list(getattr(team, "opponent_reports", []) or [])
+    incoming_team = str(payload.get("team_name") or "").strip().lower()
+    incoming_season = str(payload.get("season") or "").strip().lower()
+    incoming_source = str(payload.get("source_file_name") or "").strip().lower()
+
+    def _is_same_opponent_report(item: dict[str, Any]) -> bool:
+        item_team = str(item.get("team_name") or "").strip().lower()
+        item_season = str(item.get("season") or "").strip().lower()
+        item_source = str(item.get("source_file_name") or "").strip().lower()
+
+        if incoming_source and item_source and item_source == incoming_source:
+            return True
+
+        if incoming_team and item_team and incoming_team == item_team:
+            if not incoming_season or not item_season or incoming_season == item_season:
+                return True
+
+        return False
+
     existing_reports = [
         item
         for item in existing_reports
-        if str(item.get("source_file_name", "")) != str(payload["source_file_name"])
+        if not _is_same_opponent_report(item)
     ]
     existing_reports.append(payload)
 
     team.opponent_reports = existing_reports
     team.active_opponent_report_id = report_id
 
-    pitchers = list(payload.get("pitchers", []) or [])
-    if pitchers:
-        team.active_opponent_pitcher_name = str(pitchers[0].get("name", ""))
-    else:
-        team.active_opponent_pitcher_name = None
+    team.active_opponent_pitcher_name = str(pitchers[0].get("name", ""))
 
     team.import_history.append(
         {
@@ -679,22 +711,6 @@ def get_active_opponent_context(
         "pitcher": pitcher,
         "derived_opponent_level": report.get("derived_opponent_level"),
     }
-
-
-def delete_opponent_report(session_id: str, opponent_report_id: str) -> None:
-    manager = get_session_manager()
-    session = manager.get_session(session_id)
-
-    reports = list(session.get("opponent_reports", []))
-
-    reports = [
-        r for r in reports
-        if str(r.get("opponent_report_id")) != str(opponent_report_id)
-    ]
-
-    session["opponent_reports"] = reports
-
-    manager.save_session(session_id, session)
 
 
 def select_active_opponent_pitcher(
