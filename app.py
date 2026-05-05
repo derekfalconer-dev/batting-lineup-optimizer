@@ -15,7 +15,6 @@ from dataclasses import replace
 from ui.auth import (
     render_login_gate,
     require_authenticated_user,
-    render_signed_in_banner,
 )
 
 from ui.copy_blocks import (
@@ -1625,6 +1624,271 @@ def get_coach_lab_profiles(results: WorkflowResponseSchema | None) -> list[Playe
         st.session_state.coach_lab_player_profiles_cache = results.player_profiles
         return list(results.player_profiles)
 
+
+def render_game_plan_actions(
+    run_settings: dict,
+    *,
+    continuous_batting: bool,
+    lineup_size: int,
+    disabled: bool = False,
+) -> None:
+    action_cols = st.columns(3)
+
+    with action_cols[0]:
+        if st.button(
+                "Optimize Lineup",
+                use_container_width=True,
+                key="game_plan_optimize_lineup",
+                disabled=disabled,
+        ):
+            clear_run_status_tile()
+
+            try:
+                with st.spinner("Optimizing current roster..."):
+                    fresh_results = run_optimization(
+                        st.session_state.optimizer_session_id,
+                        output_dir=st.session_state.output_dir,
+                        target_runs=run_settings["target_runs"],
+                        optimizer_config=run_settings["optimizer_config"],
+                        rules=RulesConfig(**run_settings["rules_config"]),
+                    )
+
+                    st.session_state.last_completed_results = fresh_results
+
+                    apply_optimized_lineup_to_dashboard(
+                        fresh_results.optimized.lineup,
+                        continuous_batting=continuous_batting,
+                        lineup_size=lineup_size,
+                    )
+
+                    optimized_workspace_names = get_current_active_lineup_names(
+                        get_editable_roster_for_ui(),
+                        continuous_batting=continuous_batting,
+                        lineup_size=lineup_size,
+                    )
+
+                    set_custom_lineup(
+                        st.session_state.optimizer_session_id,
+                        lineup_names=optimized_workspace_names,
+                    )
+
+                    custom_eval = evaluate_custom_lineup(
+                        st.session_state.optimizer_session_id,
+                        target_runs=run_settings["target_runs"],
+                        n_games=run_settings["optimizer_config"]["refine_games"],
+                        seed=run_settings["optimizer_config"]["seed"],
+                        display_name="Optimized Workspace",
+                        rules=RulesConfig(**run_settings["rules_config"]),
+                    )
+
+                    st.session_state.coach_lab_last_custom_eval = custom_eval
+
+                    generic_same_lineup_result = None
+                    rules_config = run_settings.get("rules_config", {}) or {}
+
+                    if _has_pitcher_matchup_context(rules_config):
+                        try:
+                            generic_rules_config = _build_generic_rules_for_matchup_baseline(rules_config)
+
+                            generic_same_lineup_result = evaluate_custom_lineup(
+                                st.session_state.optimizer_session_id,
+                                target_runs=float(run_settings["target_runs"]),
+                                n_games=int(run_settings["optimizer_config"].get("refine_games", 3000)),
+                                seed=int(run_settings["optimizer_config"].get("seed", 42)) + 909,
+                                display_name="Generic Opponent Baseline",
+                                rules=RulesConfig(**generic_rules_config),
+                            )
+                        except Exception as exc:
+                            generic_same_lineup_result = None
+                            st.warning(f"Could not compute generic opponent baseline: {exc}")
+
+                    st.session_state.matchup_impact_generic_baseline = generic_same_lineup_result
+
+                    st.session_state.coach_lab_workspace_mode = "optimized"
+                    st.session_state.coach_lab_include_live_custom = True
+
+                    optimizer_meta = {}
+                    try:
+                        optimizer_meta = dict(
+                            getattr(getattr(fresh_results, "coach_summary", None), "optimizer_meta", {}) or {}
+                        )
+                    except Exception:
+                        optimizer_meta = {}
+
+                    summary = build_optimizer_simulation_summary(
+                        label="Roster optimization",
+                        innings_per_game=int(run_settings["rules_config"]["innings"]),
+                        optimizer_meta=optimizer_meta,
+                        refine_games=int(run_settings["optimizer_config"]["refine_games"]),
+                    )
+
+                    set_run_status_tile(
+                        kind="success",
+                        title="Roster optimization",
+                        detail=summary["detail"],
+                    )
+
+                    clear_lineup_order_widget_state()
+
+                st.rerun()
+
+            except Exception as exc:
+                set_run_status_tile(
+                    kind="error",
+                    title="Roster optimization",
+                    detail=f"Could not optimize current roster: {exc}",
+                )
+                st.rerun()
+
+        st.caption(
+            "Searches thousands of lineup combinations\n"
+            "to recommend your highest-scoring order."
+        )
+
+    with action_cols[1]:
+        if st.button(
+                "Simulate My Lineup",
+                use_container_width=True,
+                key="game_plan_simulate_my_lineup",
+                disabled=disabled,
+        ):
+            clear_run_status_tile()
+
+            try:
+                with st.spinner("Simulating current custom batting order..."):
+                    current_workspace_names = get_current_active_lineup_names(
+                        get_editable_roster_for_ui(),
+                        continuous_batting=continuous_batting,
+                        lineup_size=lineup_size,
+                    )
+
+                    set_custom_lineup(
+                        st.session_state.optimizer_session_id,
+                        lineup_names=current_workspace_names,
+                    )
+
+                    custom_eval = evaluate_custom_lineup(
+                        st.session_state.optimizer_session_id,
+                        target_runs=run_settings["target_runs"],
+                        n_games=run_settings["optimizer_config"]["refine_games"],
+                        seed=run_settings["optimizer_config"]["seed"],
+                        display_name="Coach Custom",
+                        rules=RulesConfig(**run_settings["rules_config"]),
+                    )
+
+                    st.session_state.coach_lab_last_custom_eval = custom_eval
+                    st.session_state.coach_lab_workspace_mode = "custom"
+                    st.session_state.coach_lab_include_live_custom = True
+
+                    summary = build_direct_simulation_summary(
+                        label="Custom lineup simulation",
+                        n_games=int(run_settings["optimizer_config"]["refine_games"]),
+                        innings_per_game=int(run_settings["rules_config"]["innings"]),
+                    )
+
+                    telemetry = (
+                        custom_eval.get("custom_lineup", {})
+                        .get("simulation_telemetry", {})
+                        if isinstance(custom_eval, dict)
+                        else {}
+                    )
+
+                    if telemetry:
+                        summary["detail"] += (
+                            f" Signature chart data captured from "
+                            f"{int(telemetry.get('total_plate_appearances', 0)):,} simulated plate appearances, "
+                            f"{int(telemetry.get('total_pressure_events', 0)):,} pressure events, "
+                            f"and {int(telemetry.get('total_rally_innings', 0)):,} rally innings."
+                        )
+
+                    set_run_status_tile(
+                        kind="success",
+                        title="Custom lineup simulation",
+                        detail=summary["detail"],
+                    )
+
+                st.rerun()
+
+            except Exception as exc:
+                set_run_status_tile(
+                    kind="error",
+                    title="Custom lineup simulation",
+                    detail=f"Could not simulate current lineup: {exc}",
+                )
+                st.rerun()
+
+        st.caption(
+            "Tests your current batting order with\n"
+            "large-scale Monte Carlo game simulation."
+        )
+
+    with action_cols[2]:
+        if st.button(
+                "Absent Player Analysis",
+                use_container_width=True,
+                key="game_plan_absent_player_analysis",
+                disabled=disabled,
+        ):
+            clear_run_status_tile()
+
+            set_run_status_tile(
+                kind="info",
+                title="Running Absent Player Analysis",
+                detail=(
+                    "Running large-scale simulations for every player absence. "
+                    "This may take up to 2 minutes."
+                ),
+            )
+
+            try:
+                run_absent_player_shock_analysis(run_settings)
+
+                set_run_status_tile(
+                    kind="success",
+                    title="Absent Player Analysis Ready",
+                    detail=(
+                        st.session_state.absent_player_shock_status
+                    ),
+                )
+
+                st.rerun()
+
+            except Exception as exc:
+                set_run_status_tile(
+                    kind="error",
+                    title="Absent Player Analysis",
+                    detail=f"Could not generate absent-player analysis: {exc}",
+                )
+                st.rerun()
+
+        st.caption(
+            "Measures how much offense drops if a starter\n"
+            "is absent using large-scale simulation."
+        )
+
+
+def render_game_plan_section(run_settings: dict) -> None:
+    st.markdown("## Game Plan")
+    st.caption("Choose the next scenario to run. Results appear below, and lineup edits live in Lineup Builder.")
+
+    render_run_status_tile()
+
+    session_state = get_backend_session()
+    has_team = bool(session_state.data_source)
+
+    if not has_team:
+        st.info("Start by loading or creating a team, then run a Game Plan action.")
+
+    continuous_batting = bool(run_settings["rules_config"].get("continuous_batting", True))
+    lineup_size = int(run_settings["rules_config"].get("lineup_size", 9))
+
+    render_game_plan_actions(
+        run_settings,
+        continuous_batting=continuous_batting,
+        lineup_size=lineup_size,
+        disabled=not has_team,
+    )
+
     cached = st.session_state.get("coach_lab_player_profiles_cache", [])
     return list(cached)
 
@@ -3006,7 +3270,7 @@ def render_custom_lineup_result(
     st.markdown("### Your custom lineup result")
 
     st.caption(
-        "This is the result for the batting order currently shown in Coach Lab. "
+        "This is the result for the batting order currently shown in Lineup Builder. "
         "If you want it to appear in comparison charts later, click **Save Scenario for Charts**."
     )
 
@@ -3045,26 +3309,26 @@ def render_custom_lineup_result(
     else:
         c6.metric(f"Current chance of {target_runs:.0f}+", "—")
 
-    st.markdown("#### Current custom batting order")
-    for i, name in enumerate(custom["lineup"], start=1):
-        st.write(f"{i}. {name}")
 
 
 def render_coach_lab(
     results: WorkflowResponseSchema | None,
     run_settings: dict,
 ) -> None:
+    st.markdown("## Lineup Builder")
+    st.caption("Set up your lineup, then use Game Plan above to run scenarios.")
+
     st.caption(
         "Manage the roster, adjust player traits, optimize the active roster, "
         "and test the custom batting order currently shown below."
     )
 
-    with st.expander("What the model is assuming in Coach Lab", expanded=False):
+    with st.expander("What the model is assuming in Lineup Builder", expanded=False):
         st.markdown(
             """
 - This is a lineup comparison tool, not an exact score predictor.
 - GameChanger data is used as directional input and can be noisy if scorekeeping is inconsistent.
-- Coach edits and archetype players are meant to help when the imported data is sparse or misleading.
+- Lineup Builder edits and archetype players are meant to help when the imported data is sparse or misleading.
 - The most useful question is usually: **Does this lineup tend to look better than my other options?**
             """
         )
@@ -3117,251 +3381,12 @@ def render_coach_lab(
         st.divider()
 
         with st.container(border=True):
-            st.markdown("### Coach Action")
+            st.markdown("### Save scenario for charts")
             st.caption(
-                "Run lineup analysis first. Then name and save any lineup you want to compare in the charts."
+                "Run lineup analysis from Game Plan above. Then name and save any lineup you want to compare in the charts."
             )
 
-            render_run_status_tile()
-
-            action_cols = st.columns(3)
-
-            with action_cols[0]:
-                if st.button(
-                        "Optimize Current Roster",
-                        use_container_width=True,
-                        key="dashboard_optimize_current_roster",
-                ):
-                    clear_run_status_tile()
-
-                    try:
-                        with st.spinner("Optimizing current roster..."):
-                            fresh_results = run_optimization(
-                                st.session_state.optimizer_session_id,
-                                output_dir=st.session_state.output_dir,
-                                target_runs=run_settings["target_runs"],
-                                optimizer_config=run_settings["optimizer_config"],
-                                rules=RulesConfig(**run_settings["rules_config"]),
-                            )
-
-                            st.session_state.last_completed_results = fresh_results
-
-                            apply_optimized_lineup_to_dashboard(
-                                fresh_results.optimized.lineup,
-                                continuous_batting=continuous_batting,
-                                lineup_size=lineup_size,
-                            )
-
-                            optimized_workspace_names = get_current_active_lineup_names(
-                                get_editable_roster_for_ui(),
-                                continuous_batting=continuous_batting,
-                                lineup_size=lineup_size,
-                            )
-
-                            set_custom_lineup(
-                                st.session_state.optimizer_session_id,
-                                lineup_names=optimized_workspace_names,
-                            )
-
-                            custom_eval = evaluate_custom_lineup(
-                                st.session_state.optimizer_session_id,
-                                target_runs=run_settings["target_runs"],
-                                n_games=run_settings["optimizer_config"]["refine_games"],
-                                seed=run_settings["optimizer_config"]["seed"],
-                                display_name="Optimized Workspace",
-                                rules=RulesConfig(**run_settings["rules_config"]),
-                            )
-
-                            st.session_state.coach_lab_last_custom_eval = custom_eval
-
-                            generic_same_lineup_result = None
-                            rules_config = run_settings.get("rules_config", {}) or {}
-
-                            if _has_pitcher_matchup_context(rules_config):
-                                try:
-                                    generic_rules_config = _build_generic_rules_for_matchup_baseline(rules_config)
-
-                                    generic_same_lineup_result = evaluate_custom_lineup(
-                                        st.session_state.optimizer_session_id,
-                                        target_runs=float(run_settings["target_runs"]),
-                                        n_games=int(run_settings["optimizer_config"].get("refine_games", 3000)),
-                                        seed=int(run_settings["optimizer_config"].get("seed", 42)) + 909,
-                                        display_name="Generic Opponent Baseline",
-                                        rules=RulesConfig(**generic_rules_config),
-                                    )
-                                except Exception as exc:
-                                    generic_same_lineup_result = None
-                                    st.warning(f"Could not compute generic opponent baseline: {exc}")
-
-                            st.session_state.matchup_impact_generic_baseline = generic_same_lineup_result
-
-                            st.session_state.coach_lab_workspace_mode = "optimized"
-                            st.session_state.coach_lab_include_live_custom = True
-
-                            optimizer_meta = {}
-                            try:
-                                optimizer_meta = dict(
-                                    getattr(getattr(fresh_results, "coach_summary", None), "optimizer_meta", {}) or {}
-                                )
-                            except Exception:
-                                optimizer_meta = {}
-
-                            summary = build_optimizer_simulation_summary(
-                                label="Roster optimization",
-                                innings_per_game=int(run_settings["rules_config"]["innings"]),
-                                optimizer_meta=optimizer_meta,
-                                refine_games=int(run_settings["optimizer_config"]["refine_games"]),
-                            )
-
-                            set_run_status_tile(
-                                kind="success",
-                                title="Roster optimization",
-                                detail=summary["detail"],
-                            )
-
-                            clear_lineup_order_widget_state()
-
-                        st.rerun()
-
-                    except Exception as exc:
-                        set_run_status_tile(
-                            kind="error",
-                            title="Roster optimization",
-                            detail=f"Could not optimize current roster: {exc}",
-                        )
-                        st.rerun()
-
-                st.caption(
-                    "Searches thousands of lineup combinations\n"
-                    "to recommend your highest-scoring order."
-                )
-
-            with action_cols[1]:
-                if st.button(
-                        "Simulate My Lineup",
-                        use_container_width=True,
-                        key="dashboard_simulate_my_lineup",
-                ):
-                    clear_run_status_tile()
-
-                    try:
-                        with st.spinner("Simulating current custom batting order..."):
-                            current_workspace_names = get_current_active_lineup_names(
-                                get_editable_roster_for_ui(),
-                                continuous_batting=continuous_batting,
-                                lineup_size=lineup_size,
-                            )
-
-                            set_custom_lineup(
-                                st.session_state.optimizer_session_id,
-                                lineup_names=current_workspace_names,
-                            )
-
-                            custom_eval = evaluate_custom_lineup(
-                                st.session_state.optimizer_session_id,
-                                target_runs=run_settings["target_runs"],
-                                n_games=run_settings["optimizer_config"]["refine_games"],
-                                seed=run_settings["optimizer_config"]["seed"],
-                                display_name="Coach Custom",
-                                rules=RulesConfig(**run_settings["rules_config"]),
-                            )
-
-                            st.session_state.coach_lab_last_custom_eval = custom_eval
-                            st.session_state.coach_lab_workspace_mode = "custom"
-                            st.session_state.coach_lab_include_live_custom = True
-
-                            summary = build_direct_simulation_summary(
-                                label="Custom lineup simulation",
-                                n_games=int(run_settings["optimizer_config"]["refine_games"]),
-                                innings_per_game=int(run_settings["rules_config"]["innings"]),
-                            )
-
-                            telemetry = (
-                                custom_eval.get("custom_lineup", {})
-                                .get("simulation_telemetry", {})
-                                if isinstance(custom_eval, dict)
-                                else {}
-                            )
-
-                            if telemetry:
-                                summary["detail"] += (
-                                    f" Signature chart data captured from "
-                                    f"{int(telemetry.get('total_plate_appearances', 0)):,} simulated plate appearances, "
-                                    f"{int(telemetry.get('total_pressure_events', 0)):,} pressure events, "
-                                    f"and {int(telemetry.get('total_rally_innings', 0)):,} rally innings."
-                                )
-
-                            set_run_status_tile(
-                                kind="success",
-                                title="Custom lineup simulation",
-                                detail=summary["detail"],
-                            )
-
-                        st.rerun()
-
-                    except Exception as exc:
-                        set_run_status_tile(
-                            kind="error",
-                            title="Custom lineup simulation",
-                            detail=f"Could not simulate current lineup: {exc}",
-                        )
-                        st.rerun()
-
-                st.caption(
-                    "Tests your current batting order with\n"
-                    "large-scale Monte Carlo game simulation."
-                )
-
-            with action_cols[2]:
-                if st.button(
-                        "Run Lineup Shock Analysis",
-                        use_container_width=True,
-                        key="dashboard_generate_absent_player_shock",
-                ):
-                    clear_run_status_tile()
-
-                    set_run_status_tile(
-                        kind="info",
-                        title="Running Absent Player Analysis",
-                        detail=(
-                            "Running large-scale simulations for every player absence. "
-                            "This may take up to 2 minutes."
-                        ),
-                    )
-
-                    try:
-                        run_absent_player_shock_analysis(run_settings)
-
-                        set_run_status_tile(
-                            kind="success",
-                            title="Absent Player Analysis Ready",
-                            detail=(
-                                st.session_state.absent_player_shock_status
-                            ),
-                        )
-
-                        st.rerun()
-
-                    except Exception as exc:
-                        set_run_status_tile(
-                            kind="error",
-                            title="Absent Player Analysis",
-                            detail=f"Could not generate analysis: {exc}",
-                        )
-                        st.rerun()
-
-                    except Exception as exc:
-                        set_run_status_tile(
-                            kind="error",
-                            title="Absent Player Analysis",
-                            detail=f"Could not generate absent-player analysis: {exc}",
-                        )
-                        st.rerun()
-
-                st.caption(
-                    "Measures how much offense drops if a starter\n"
-                    "is absent using large-scale simulation."
-                )
+            st.info("Use Game Plan above to optimize, simulate, or run absent-player analysis.")
 
             st.markdown("---")
             save_cols = st.columns([2, 1])
@@ -3523,7 +3548,7 @@ def render_coach_lab(
                         st.markdown(
                             """
                     **Recommended workflow for low-confidence players**
-                    1. Open that player in Coach Lab  
+                    1. Open that player in Lineup Builder  
                     2. Check whether the imported profile matches what you see in real games  
                     3. Make a small trait edit or swap to a more realistic archetype if needed  
                     4. Re-simulate or re-optimize the lineup  
@@ -3688,63 +3713,32 @@ def render_coach_footer(results: WorkflowResponseSchema) -> None:
 
 
 def render_results(results: WorkflowResponseSchema | None) -> None:
-    st.markdown(
-        """
-    <div style="
-    padding:18px 22px;
-    border-radius:18px;
-    border:1px solid rgba(120,160,255,.28);
-    background: linear-gradient(
-    180deg,
-    rgba(56,109,255,.12),
-    rgba(56,109,255,.04)
-    );
-    margin-bottom:1rem;
-    ">
-    <div style="
-    font-size:2rem;
-    font-weight:800;
-    letter-spacing:.01em;
-    margin-bottom:.35rem;
-    ">
-    ⚾ Coach Lab
-    </div>
-
-    <div style="
-    font-size:1.02rem;
-    opacity:.88;
-    ">
-    Build, test, optimize, and compare batting orders using simulation.
-    </div>
-    </div>
-    """,
-        unsafe_allow_html=True,
-    )
-
-    render_coach_lab(results, st.session_state.run_settings_cache)
-
-    st.markdown("---")
-    st.markdown("## Lineup Insights")
+    st.markdown("## Results")
+    st.caption("Review the latest lineup output, charts, and supporting details.")
 
     if results is None:
         st.caption(
-            "Run an optimization to unlock player breakdowns, alternate lineup options, and a plain-English explanation of how the model works."
+            "Run a Game Plan action to unlock charts, player breakdowns, alternate lineup options, and model notes."
         )
         return
 
+    render_coach_summary(results)
+    render_featured_lineups(results)
+
     tab_names = [
+        "Charts",
         "Players",
         "Other Options",
         "Model & Limitations",
         "Advanced",
     ]
 
-    default_tab = st.session_state.get("active_results_tab", "Players")
+    default_tab = st.session_state.get("active_results_tab", "Charts")
     if default_tab not in tab_names:
-        default_tab = "Players"
+        default_tab = "Charts"
 
     selected_tab = st.radio(
-        "Insights navigation",
+        "Results navigation",
         options=tab_names,
         horizontal=True,
         label_visibility="collapsed",
@@ -3755,7 +3749,10 @@ def render_results(results: WorkflowResponseSchema | None) -> None:
     st.session_state.active_results_tab = selected_tab
     st.markdown("---")
 
-    if selected_tab == "Players":
+    if selected_tab == "Charts":
+        render_charts(results)
+
+    elif selected_tab == "Players":
         render_player_profiles(results.player_profiles)
 
     elif selected_tab == "Other Options":
@@ -4307,12 +4304,17 @@ def main() -> None:
     backend_session = get_backend_session()
     ensure_selected_team()
 
-    render_signed_in_banner()
+    try:
+        from core.auth import get_current_user
+
+        current_user = get_current_user()
+        st.sidebar.caption(f"Signed in as {current_user.email}")
+    except Exception:
+        pass
 
     st.title(APP_TITLE)
     st.caption(APP_SUBTITLE)
 
-    render_how_to_use_panel()
     render_team_switcher()
 
     run_settings = render_sidebar(backend_session)
@@ -4322,15 +4324,23 @@ def main() -> None:
 
     st.session_state.run_settings_cache = run_settings
 
-    render_model_limitations_panel()
-
     render_team_entry_panel(backend_session)
 
     render_additional_gc_data_panel(backend_session)
     st.markdown("")
 
+    render_game_plan_section(run_settings)
+
     existing_results = safe_get_results()
     render_results(existing_results)
+
+    st.markdown("---")
+    render_coach_lab(existing_results, run_settings)
+
+    st.markdown("---")
+    st.markdown("## Help and model notes")
+    render_how_to_use_panel()
+    render_model_limitations_panel()
 
 
 if __name__ == "__main__":
