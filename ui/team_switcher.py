@@ -436,6 +436,7 @@ def render_team_switcher() -> None:
                     reset_team_scoped_ui_state()
 
                     st.session_state.show_team_loader = True
+                    st.session_state["open_game_rules_on_new_team"] = True
                     bump_team_entry_expander_token()
 
                     st.success(f"Created team: {cleaned}")

@@ -538,10 +538,9 @@ def render_sidebar(session_state: SessionStateSchema) -> dict:
     saved_rules_preset, saved_rules_config = get_saved_rules_for_active_team()
     saved_rules_config = dict(saved_rules_config or {})
 
-    # Auto-open rules for brand-new / unconfigured teams, collapse after rules exist.
-    rules_expanded = not bool(saved_rules_config)
+    open_game_rules = bool(st.session_state.pop("open_game_rules_on_new_team", False))
 
-    with st.sidebar.expander("⚾ Game Rules", expanded=rules_expanded):
+    with st.sidebar.expander("⚾ Game Rules", expanded=open_game_rules):
         st.caption("Choose a preset, then tweak if needed.")
 
         preset_options = [
