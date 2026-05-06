@@ -58,6 +58,59 @@ def save_rules_for_active_team(
         pass
 
 
+def _pitcher_payload_number(pitcher: dict, field: str) -> float:
+    source_row = pitcher.get("source_row") if isinstance(pitcher, dict) else None
+
+    raw_value = pitcher.get(field, 0) if isinstance(pitcher, dict) else getattr(pitcher, field, 0)
+    if raw_value in (None, "", 0, 0.0) and isinstance(source_row, dict):
+        raw_value = source_row.get(field, 0)
+
+    try:
+        return float(raw_value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _is_usable_opponent_pitcher_payload(pitcher: dict) -> bool:
+    """
+    UI dropdown filter for serialized MaxPreps pitcher profiles.
+
+    The parsed MaxPreps row is the source of truth. Some parser fields are
+    serialized inside source_row, so check both profile-level and source-row
+    values before deciding whether a pitcher belongs in the selector.
+    """
+    name = str(pitcher.get("name", "") or "").strip().lower()
+    if not name or name == "n. player":
+        return False
+
+    return (
+        _pitcher_payload_number(pitcher, "innings_pitched") > 0
+        or _pitcher_payload_number(pitcher, "batters_faced") > 0
+        or _pitcher_payload_number(pitcher, "pitches") > 0
+        or _pitcher_payload_number(pitcher, "strikeouts") > 0
+        or _pitcher_payload_number(pitcher, "walks") > 0
+    )
+
+
+def _usable_opponent_pitcher_payloads(pitchers: list[dict]) -> list[dict]:
+    usable_pitchers = [
+        pitcher
+        for pitcher in list(pitchers or [])
+        if _is_usable_opponent_pitcher_payload(pitcher)
+    ]
+
+    usable_pitchers.sort(
+        key=lambda pitcher: (
+            -_pitcher_payload_number(pitcher, "innings_pitched"),
+            -_pitcher_payload_number(pitcher, "batters_faced"),
+            -_pitcher_payload_number(pitcher, "pitches"),
+            str(pitcher.get("name", "")),
+        )
+    )
+
+    return usable_pitchers
+
+
 def render_opponent_scouting_panel() -> None:
     st.sidebar.markdown("## 🧢 Opponent Scouting")
     st.sidebar.caption(
@@ -68,8 +121,10 @@ def render_opponent_scouting_panel() -> None:
     active_context = get_active_opponent_context(st.session_state.optimizer_session_id)
     active_report = (active_context or {}).get("report") or {}
     active_pitcher = (active_context or {}).get("pitcher") or {}
+    active_report_pitchers = list(active_report.get("pitchers", []) or [])
     has_usable_maxpreps_context = bool(
-        active_report.get("opponent_report_id") and active_pitcher.get("name")
+        active_report.get("opponent_report_id")
+        and any(_is_usable_opponent_pitcher_payload(p) for p in active_report_pitchers)
     )
 
     opponent_source_options = ["MaxPreps Report", "Manual Pitcher", "Generic"]
@@ -265,7 +320,9 @@ def render_opponent_scouting_panel() -> None:
 
     if use_opponent_context and active_context is None and reports:
         latest_report = reports[-1]
-        latest_pitchers = list(latest_report.get("pitchers", []) or [])
+        latest_pitchers = _usable_opponent_pitcher_payloads(
+            list(latest_report.get("pitchers", []) or [])
+        )
 
         if latest_pitchers:
             try:
@@ -299,7 +356,9 @@ def render_opponent_scouting_panel() -> None:
             None,
         )
 
-        matching_pitchers = list((matching_report or {}).get("pitchers", []) or [])
+        matching_pitchers = _usable_opponent_pitcher_payloads(
+            list((matching_report or {}).get("pitchers", []) or [])
+        )
 
         if matching_pitchers:
             try:
@@ -326,7 +385,9 @@ def render_opponent_scouting_panel() -> None:
     )
 
     selected_report = report_by_label[selected_report_label]
-    pitchers = list(selected_report.get("pitchers", []) or [])
+    pitchers = _usable_opponent_pitcher_payloads(
+        list(selected_report.get("pitchers", []) or [])
+    )
 
     with st.sidebar.expander("Manage saved opponent report", expanded=False):
         st.caption(
@@ -370,9 +431,10 @@ def render_opponent_scouting_panel() -> None:
             st.caption("No parser diagnostics saved for this report.")
 
     if not pitchers:
+        st.session_state[f"use_opponent_context_{team_key}"] = False
         st.sidebar.warning(
-            "This opponent report has no pitcher profiles. "
-            "Delete it and re-import the PDF after parser fixes."
+            "This opponent report has no usable pitcher profiles with real pitching workload. "
+            "Using generic opponent settings instead."
         )
         return
 
