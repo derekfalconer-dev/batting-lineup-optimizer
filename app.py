@@ -785,10 +785,15 @@ def select_signature_chart_rows(
             names.append(name)
             item_by_name[name] = item
 
+    preferred_name = names[0] if names[0] == "Current Unsaved Custom Order" else names[-1]
+
+    if key not in st.session_state or st.session_state[key] not in names:
+        st.session_state[key] = preferred_name
+
     selected_name = st.selectbox(
         label,
         options=names,
-        index=0,
+        index=names.index(st.session_state[key]),
         key=key,
     )
 
@@ -825,7 +830,10 @@ def render_pitcher_stress_panel(
                 font-size: 1.05rem;
                 font-weight: 800;
             ">
-                Viewing scenario: {selected_name}
+                Displaying signature data for: {selected_name}
+                <div style='font-size:0.82rem; opacity:.78; margin-top:0.25rem;'>
+                    Changing the Scenario dropdown changes the chart below.
+                </div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -1040,7 +1048,10 @@ def render_rally_ignition_panel(
                 font-size: 1.05rem;
                 font-weight: 800;
             ">
-                Viewing scenario: {selected_name}
+                Displaying signature data for: {selected_name}
+                <div style='font-size:0.82rem; opacity:.78; margin-top:0.25rem;'>
+                    Changing the Scenario dropdown changes the chart below.
+                </div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -2599,8 +2610,7 @@ def build_chart_compare_set(
 
     if include_live_custom and custom_eval_payload and custom_eval_payload.get("custom_lineup"):
         custom_item = dict(custom_eval_payload["custom_lineup"])
-        if not custom_item.get("display_name"):
-            custom_item["display_name"] = "Current Unsaved Custom Order"
+        custom_item["display_name"] = "Current Unsaved Custom Order"
         items.append(custom_item)
 
     selected_name_set = None if selected_saved_names is None else set(selected_saved_names)
@@ -2652,7 +2662,7 @@ def render_coach_lab_comparison_section(
     DEFAULT_COMPARE_SCENARIOS = 3
     MAX_COMPARE_SCENARIOS = 5
 
-    control_cols = st.columns([2.3, 1, 1, 2.4])
+    control_cols = st.columns([2.8, 1.35, 1.45, 1.4])
 
     with control_cols[0]:
         include_live_custom = st.checkbox(
@@ -2680,7 +2690,7 @@ def render_coach_lab_comparison_section(
 
     with control_cols[1]:
         if st.button(
-                "Select latest 5",
+                "Latest 5",
                 key="coach_lab_select_latest_5_scenarios",
                 use_container_width=True,
         ):
@@ -2689,7 +2699,7 @@ def render_coach_lab_comparison_section(
 
     with control_cols[2]:
         if st.button(
-                "Clear selection",
+                "Clear",
                 key="coach_lab_clear_selected_scenarios",
                 use_container_width=True,
         ):
@@ -2724,17 +2734,12 @@ def render_coach_lab_comparison_section(
     st.markdown("### Compare lineup scenarios")
     st.caption("Saved scenarios appear here. You can also include the current unsaved custom lineup.")
 
-    st.info(
-        "To get a lineup into these charts: set up the batting order you want, click **Simulate My Lineup**, "
-        "then click **Save Scenario for Charts**."
-    )
-
     enough_to_plot = len(compare_items) >= 1
 
     if not enough_to_plot:
         st.info(
-            "Create and save a scenario to build comparison plots. "
-            "You can also include the current unsaved custom order."
+            "To get a lineup into these charts: set up the batting order you want, click **Simulate My Lineup**, "
+            "then click **Save Scenario for Charts**."
         )
 
     # -----------------------------
@@ -3307,6 +3312,8 @@ def render_coach_lab(
 
                             st.session_state.coach_lab_workspace_mode = "optimized"
                             st.session_state.coach_lab_include_live_custom = True
+                            st.session_state.pitcher_stress_signature_scenario = "Current Unsaved Custom Order"
+                            st.session_state.rally_ignition_signature_scenario = "Current Unsaved Custom Order"
 
                             optimizer_meta = {}
                             try:
@@ -3379,6 +3386,8 @@ def render_coach_lab(
                             st.session_state.coach_lab_last_custom_eval = custom_eval
                             st.session_state.coach_lab_workspace_mode = "custom"
                             st.session_state.coach_lab_include_live_custom = True
+                            st.session_state.pitcher_stress_signature_scenario = "Current Unsaved Custom Order"
+                            st.session_state.rally_ignition_signature_scenario = "Current Unsaved Custom Order"
 
                             summary = build_direct_simulation_summary(
                                 label="Custom lineup simulation",
@@ -3546,6 +3555,12 @@ def render_coach_lab(
                                 st.session_state.coach_lab_last_custom_eval = live_eval
 
                         st.session_state.coach_lab_include_live_custom = False
+                        selected_compare_names = list(st.session_state.get("coach_lab_compare_selected_scenarios", []))
+                        st.session_state.coach_lab_compare_selected_scenarios = (
+                            [name for name in selected_compare_names if name != saved_name] + [saved_name]
+                        )[-5:]
+                        st.session_state.pitcher_stress_signature_scenario = saved_name
+                        st.session_state.rally_ignition_signature_scenario = saved_name
 
                         existing = st.session_state.get("coach_lab_saved_scenario_messages", [])
                         existing.append(f"Saved scenario: {saved_name}")
