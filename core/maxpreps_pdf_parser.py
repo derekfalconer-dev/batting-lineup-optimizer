@@ -222,21 +222,64 @@ def _parse_pitching_totals(text: str, report: MaxPrepsOpponentReport) -> None:
         report.team_obp_allowed = _safe_float(match_rates.group(2))
 
 
+_NAME_LINE_RE = re.compile(
+    r"^[A-Z]\.\s+[A-Za-z'’\-\s]+(?:\([^)]+\))?$"
+)
+
+
+def _line_is_int(value: str) -> bool:
+    return re.fullmatch(r"\d+", str(value).strip()) is not None
+
+
+def _line_looks_like_name(value: str) -> bool:
+    return _NAME_LINE_RE.match(str(value).strip()) is not None
+
+
+def _line_starts_pitcher_row(lines: list[str], idx: int) -> bool:
+    if idx >= len(lines):
+        return False
+
+    line = lines[idx].strip()
+
+    if line == "N. Player":
+        return True
+
+    return (
+        _line_is_int(line)
+        and idx + 1 < len(lines)
+        and _line_looks_like_name(lines[idx + 1])
+    )
+
+
+def _parse_name_and_grade(value: str) -> tuple[str, str | None]:
+    cleaned = " ".join(str(value).strip().split())
+    match = re.match(
+        r"^(?P<name>[A-Z]\.\s+[A-Za-z'’\-\s]+?)(?:\s*\((?P<grade>[^)]+)\))?$",
+        cleaned,
+    )
+    if not match:
+        return cleaned, None
+
+    return " ".join(match.group("name").split()), match.group("grade")
+
+
 def _parse_pitching_rows(text: str, report: MaxPrepsOpponentReport) -> None:
     """
     Parse MaxPreps pitching rows defensively.
 
-    MaxPreps printable PDFs are only semi-structured:
+    MaxPreps printable PDFs are semi-structured:
     - Pitching can span pages.
     - Each stat family is printed as a separate table.
+    - PyMuPDF often extracts the PDF as a stream of table cells, not full rows.
     - PDF text extraction often drops zero-value cells.
     - Some reports include bogus "N. Player" rows.
     - Header blocks can repeat.
 
     Strategy:
-    - Parse all row-like lines after the Pitching heading.
-    - Classify each row by numeric token shape.
-    - Merge fragments by player number + normalized name.
+    - Walk the Pitching section line-by-line as a cell stream.
+    - Detect table headers and classify the active table family.
+    - Read each pitcher row as: jersey number -> name -> numeric cells until next row/header.
+    - Merge summary/core/rates fragments by player number + normalized name.
     - Prefer IP/BF/#P/APP as evidence that the player actually pitched.
     """
     pitching_section = _section_from(text, "Pitching")
@@ -249,8 +292,11 @@ def _parse_pitching_rows(text: str, report: MaxPrepsOpponentReport) -> None:
             "pitchers_loaded": 0,
             "skipped_zero_rows": 0,
             "skipped_placeholder_rows": 0,
+            "row_shape_counts": {},
         }
         return
+
+    lines = [line.strip() for line in pitching_section.splitlines() if line.strip()]
 
     merged: dict[str, MaxPrepsPitchingRow] = {}
     fragments_seen = 0
@@ -258,58 +304,122 @@ def _parse_pitching_rows(text: str, report: MaxPrepsOpponentReport) -> None:
     skipped_zero_rows = 0
     row_shape_counts: dict[str, int] = {}
 
-    row_pattern = re.compile(
-        r"^\s*(?P<num>\d+)?\s*"
-        r"(?P<name>[A-Z]\.\s+[A-Za-z'’\-\s]+?|N\.\s+Player)\s*"
-        r"(?:\((?P<grade>[^)]+)\))?\s+"
-        r"(?P<stats>[0-9.\s]+)$",
-        re.MULTILINE,
-    )
+    active_table: str | None = None
+    idx = 0
 
-    for match in row_pattern.finditer(pitching_section):
-        raw_name = " ".join(match.group("name").strip().split())
-        if raw_name.lower() == "n. player":
-            skipped_placeholder_rows += 1
+    while idx < len(lines):
+        line = lines[idx]
+
+        # Header block:
+        # #
+        # Athlete Name
+        # ERA/W/L... or IP/H/R... or OBA/OBP...
+        if line == "#" and idx + 1 < len(lines) and lines[idx + 1] == "Athlete Name":
+            header: list[str] = []
+            idx += 2
+
+            while (
+                idx < len(lines)
+                and not _line_starts_pitcher_row(lines, idx)
+                and lines[idx] not in {"#", "Season Totals"}
+            ):
+                header.append(lines[idx])
+                idx += 1
+
+            header_set = set(header)
+
+            if "IP" in header_set and "BF" in header_set:
+                active_table = "core"
+            elif "OBA" in header_set and "#P" in header_set:
+                active_table = "rates"
+            elif "ERA" in header_set and "APP" in header_set:
+                active_table = "summary"
+            else:
+                active_table = None
+
             continue
 
-        number = str(match.group("num") or "").strip()
-        grade = match.group("grade").strip() if match.group("grade") else None
-        stat_tokens = match.group("stats").split()
-
-        if not stat_tokens:
+        # Skip season totals for row parsing. Team totals are parsed separately.
+        if line == "Season Totals":
+            idx += 1
+            while idx < len(lines) and lines[idx] != "#":
+                idx += 1
             continue
 
-        fragments_seen += 1
+        if active_table and _line_starts_pitcher_row(lines, idx):
+            number = ""
+            grade = None
 
-        # Ignore obvious non-pitching tables that can appear before/after Pitching.
-        # Pitching rows are usually 5-11 numeric tokens after name/grade.
-        if len(stat_tokens) < 5 or len(stat_tokens) > 11:
+            if lines[idx] == "N. Player":
+                raw_name = "N. Player"
+                idx += 1
+            else:
+                number = lines[idx]
+                raw_name = lines[idx + 1]
+                idx += 2
+
+            raw_name = " ".join(raw_name.strip().split())
+            if raw_name.lower() == "n. player":
+                skipped_placeholder_rows += 1
+
+                # Consume the placeholder row's numeric cells.
+                while (
+                    idx < len(lines)
+                    and lines[idx] != "#"
+                    and lines[idx] != "Season Totals"
+                    and not _line_starts_pitcher_row(lines, idx)
+                ):
+                    idx += 1
+
+                continue
+
+            name, grade = _parse_name_and_grade(raw_name)
+
+            stat_tokens: list[str] = []
+            while (
+                idx < len(lines)
+                and lines[idx] != "#"
+                and lines[idx] != "Season Totals"
+                and not _line_starts_pitcher_row(lines, idx)
+            ):
+                if re.fullmatch(r"[0-9.]+", lines[idx]):
+                    stat_tokens.append(lines[idx])
+                idx += 1
+
+            if not stat_tokens:
+                continue
+
+            fragments_seen += 1
+
+            # Pitching rows are usually 5-11 numeric cells, but MaxPreps can
+            # omit zero cells. Keep this permissive so row type drives parsing.
+            if len(stat_tokens) < 2 or len(stat_tokens) > 12:
+                continue
+
+            key = _pitcher_key(number, name)
+            row = merged.get(key)
+            if row is None:
+                row = MaxPrepsPitchingRow(
+                    number=number,
+                    name=name,
+                    grade=grade,
+                )
+                merged[key] = row
+            elif not row.grade and grade:
+                row.grade = grade
+
+            row_shape_counts[active_table] = row_shape_counts.get(active_table, 0) + 1
+
+            if active_table == "summary":
+                _merge_pitching_summary_tokens(row, stat_tokens)
+            elif active_table == "core":
+                _merge_pitching_core_tokens(row, stat_tokens)
+            elif active_table == "rates":
+                _merge_pitching_rates_tokens(row, stat_tokens)
+
             continue
 
-        key = _pitcher_key(number, raw_name)
-        row = merged.get(key)
-        if row is None:
-            row = MaxPrepsPitchingRow(
-                number=number,
-                name=raw_name,
-                grade=grade,
-            )
-            merged[key] = row
-        elif not row.grade and grade:
-            row.grade = grade
-
-        shape = _classify_pitching_stat_tokens(stat_tokens)
-        row_shape_counts[shape] = row_shape_counts.get(shape, 0) + 1
-
-        if shape == "summary":
-            _merge_pitching_summary_tokens(row, stat_tokens)
-        elif shape == "core":
-            _merge_pitching_core_tokens(row, stat_tokens)
-        elif shape == "rates":
-            _merge_pitching_rates_tokens(row, stat_tokens)
-        else:
-            # Unknown fragments are expected occasionally; do not fail import.
-            continue
+        idx += 1
 
     candidates = list(merged.values())
 
@@ -492,16 +602,16 @@ def _merge_pitching_rates_tokens(row: MaxPrepsPitchingRow, tokens: list[str]) ->
     if len(tokens) >= 4:
         row.hbp = _safe_int(tokens[3]) if row.hbp is None else row.hbp
 
-    # Normal position is token 6: OBA OBP WP HBP SF SH/B #P ...
-    pitch_count = None
-    if len(tokens) >= 7:
-        pitch_count = _safe_int(tokens[6])
+    # #P is usually the largest later value. MaxPreps/PyMuPDF can omit zero
+    # cells, so the nominal token position is not reliable.
+    later_values = [_safe_int(tok) or 0 for tok in tokens[2:]]
+    plausible_pitch_counts = [value for value in later_values if value >= 20]
 
-    if pitch_count is None or pitch_count <= 0:
-        later_values = [_safe_int(tok) or 0 for tok in tokens[2:]]
-        plausible = [value for value in later_values if value >= 20]
-        if plausible:
-            pitch_count = max(plausible)
+    pitch_count = max(plausible_pitch_counts) if plausible_pitch_counts else None
+
+    # Fallback for unusually small samples where #P may be under 20.
+    if pitch_count is None and len(tokens) >= 7:
+        pitch_count = _safe_int(tokens[6])
 
     if pitch_count is not None:
         row.pitches = pitch_count
