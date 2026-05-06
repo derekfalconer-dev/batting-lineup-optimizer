@@ -2929,6 +2929,97 @@ def render_saved_scenarios_panel() -> None:
         st.caption("No saved scenarios yet.")
         return
 
+    with st.expander("Manage saved scenarios", expanded=False):
+        scenario_name_counts = {}
+        for scenario in scenarios:
+            scenario_name = str(scenario.name)
+            scenario_name_counts[scenario_name] = scenario_name_counts.get(scenario_name, 0) + 1
+
+        scenario_by_label = {}
+        scenario_labels = []
+
+        for scenario in scenarios:
+            scenario_id = str(scenario.scenario_id)
+            scenario_name = str(scenario.name)
+            label = scenario_name
+
+            if scenario_name_counts[scenario_name] > 1:
+                label = f"{scenario_name} — {scenario_id[:8]}"
+
+            scenario_labels.append(label)
+            scenario_by_label[label] = scenario
+
+        batch_delete_token = int(st.session_state.get("saved_scenarios_batch_delete_token", 0))
+        batch_select_key = f"saved_scenarios_batch_delete_selected_{batch_delete_token}"
+        batch_confirm_key = f"saved_scenarios_batch_delete_confirm_{batch_delete_token}"
+
+        control_cols = st.columns([1, 1, 4])
+
+        with control_cols[0]:
+            if st.button(
+                "Select all",
+                key="saved_scenarios_batch_select_all",
+                use_container_width=True,
+            ):
+                st.session_state[batch_select_key] = scenario_labels
+                st.rerun()
+
+        with control_cols[1]:
+            if st.button(
+                "Clear",
+                key="saved_scenarios_batch_clear",
+                use_container_width=True,
+            ):
+                st.session_state.pop(batch_select_key, None)
+                st.session_state.pop(batch_confirm_key, None)
+                st.rerun()
+
+        selected_delete_labels = st.multiselect(
+            "Select scenarios to delete",
+            options=scenario_labels,
+            default=[],
+            key=batch_select_key,
+        )
+
+        confirm_batch_delete = st.checkbox(
+            "I understand this will permanently delete the selected scenarios.",
+            key=batch_confirm_key,
+        )
+
+        if st.button(
+            "Delete selected scenarios",
+            key="saved_scenarios_batch_delete_button",
+            use_container_width=True,
+        ):
+            if not selected_delete_labels:
+                st.warning("Select at least one scenario to delete.")
+            elif not confirm_batch_delete:
+                st.warning("Confirm permanent deletion before deleting scenarios.")
+            else:
+                deleted_ids = {
+                    str(scenario_by_label[label].scenario_id)
+                    for label in selected_delete_labels
+                }
+                deleted_names = {
+                    str(scenario_by_label[label].name)
+                    for label in selected_delete_labels
+                }
+
+                for scenario_id in deleted_ids:
+                    delete_saved_scenario(
+                        st.session_state.optimizer_session_id,
+                        scenario_id=scenario_id,
+                    )
+
+                if str(st.session_state.get("scenario_rename_target")) in deleted_ids:
+                    st.session_state.scenario_rename_target = None
+
+                st.session_state.saved_scenarios_cache = []
+                st.session_state["saved_scenarios_batch_delete_token"] = batch_delete_token + 1
+
+                st.success(f"Deleted {len(deleted_ids)} saved scenario{'s' if len(deleted_ids) != 1 else ''}.")
+                st.rerun()
+
     for scenario in scenarios:
         with st.container(border=True):
             top_col1, top_col2, top_col3 = st.columns([3, 1.2, 1])
