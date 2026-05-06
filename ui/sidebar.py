@@ -111,10 +111,31 @@ def _usable_opponent_pitcher_payloads(pitchers: list[dict]) -> list[dict]:
     return usable_pitchers
 
 
-def render_opponent_scouting_panel() -> None:
+def render_opponent_defense_level_control(default_label: str = "Average") -> str:
+    defense_options = ["Weak", "Average", "Strong"]
+    if default_label not in defense_options:
+        default_label = "Average"
+
+    return st.sidebar.selectbox(
+        "Opponent Defense Level",
+        defense_options,
+        index=defense_options.index(default_label),
+        help=(
+            "Models the opponent's team defense and fielding context. "
+            "Pitcher quality is handled by MaxPreps or Manual Pitcher scouting."
+        ),
+    )
+
+
+def _has_present_diagnostic_value(value: object) -> bool:
+    return value not in (None, "", "—")
+
+
+def render_opponent_scouting_panel() -> str:
     st.sidebar.markdown("## 🧢 Opponent Scouting")
     st.sidebar.caption(
-        "Import a MaxPreps opponent report, then select the pitcher you expect to face."
+        "Choose how to model tonight’s opposing pitcher: imported MaxPreps report, "
+        "manual scouting, or a generic baseline."
     )
 
     team_key = str(st.session_state.get("selected_team_id", "no_team"))
@@ -147,7 +168,7 @@ def render_opponent_scouting_panel() -> None:
 
     if opponent_source == "Generic":
         st.sidebar.info("Using generic opponent settings below.")
-        return
+        return render_opponent_defense_level_control()
 
     if opponent_source == "Manual Pitcher":
         st.sidebar.markdown("### 🎯 Manual Pitcher")
@@ -233,59 +254,63 @@ def render_opponent_scouting_panel() -> None:
             st.write(f"Contact: x{manual_profile.contact_multiplier:.2f}")
             st.write(f"Power: x{manual_profile.power_multiplier:.2f}")
 
-        return
+        return render_opponent_defense_level_control()
 
     # MaxPreps Report mode continues below.
-    uploaded_pdf = st.sidebar.file_uploader(
-        "MaxPreps PDF",
-        type=["pdf"],
-        key=f"opponent_maxpreps_pdf_{st.session_state.get('selected_team_id', 'no_team')}",
-        help="Upload the printable MaxPreps baseball stats PDF for the opposing team.",
-    )
-
-    if uploaded_pdf is not None:
-        if st.sidebar.button(
-            "Import Opponent Report",
-            use_container_width=True,
-            key=f"import_opponent_report_{st.session_state.get('selected_team_id', 'no_team')}",
-        ):
-            try:
-                pdf_path = save_uploaded_file(
-                    uploaded_pdf,
-                    target_name=f"opponent_{Path(uploaded_pdf.name).name}",
-                )
-
-                payload = import_opponent_maxpreps_pdf(
-                    st.session_state.optimizer_session_id,
-                    pdf_path=pdf_path,
-                    source_file_name=Path(uploaded_pdf.name).name,
-                )
-
-                st.sidebar.success(
-                    f"Imported {payload.get('team_name', 'opponent')} "
-                    f"with {len(payload.get('pitchers', []) or [])} pitcher profiles."
-                )
-
-                parser_warnings = list(payload.get("parser_warnings", []) or [])
-                parser_stats = dict(payload.get("parser_stats", {}) or {})
-
-                if parser_warnings:
-                    st.sidebar.warning("Imported with parser warnings: " + " ".join(str(w) for w in parser_warnings))
-
-                if parser_stats:
-                    with st.sidebar.expander("Parser details", expanded=False):
-                        st.json(parser_stats)
-
-                st.rerun()
-
-            except Exception as exc:
-                st.sidebar.error(f"Could not import opponent report: {exc}")
-
     reports = list_opponent_reports(st.session_state.optimizer_session_id)
 
     if not reports:
-        st.sidebar.info("No opponent report imported yet.")
-        return
+        st.sidebar.info(
+            "No opponent report imported yet. Upload a MaxPreps PDF to enable pitcher scouting, "
+            "or continue with generic opponent settings below."
+        )
+
+        uploaded_pdf = st.sidebar.file_uploader(
+            "MaxPreps PDF",
+            type=["pdf"],
+            key=f"opponent_maxpreps_pdf_{st.session_state.get('selected_team_id', 'no_team')}",
+            help="Upload the printable MaxPreps baseball stats PDF for the opposing team.",
+        )
+
+        if uploaded_pdf is not None:
+            if st.sidebar.button(
+                "Import Opponent Report",
+                use_container_width=True,
+                key=f"import_opponent_report_{st.session_state.get('selected_team_id', 'no_team')}",
+            ):
+                try:
+                    pdf_path = save_uploaded_file(
+                        uploaded_pdf,
+                        target_name=f"opponent_{Path(uploaded_pdf.name).name}",
+                    )
+
+                    payload = import_opponent_maxpreps_pdf(
+                        st.session_state.optimizer_session_id,
+                        pdf_path=pdf_path,
+                        source_file_name=Path(uploaded_pdf.name).name,
+                    )
+
+                    st.sidebar.success(
+                        f"Imported {payload.get('team_name', 'opponent')} "
+                        f"with {len(payload.get('pitchers', []) or [])} pitcher profiles."
+                    )
+
+                    parser_warnings = list(payload.get("parser_warnings", []) or [])
+                    parser_stats = dict(payload.get("parser_stats", {}) or {})
+
+                    if parser_warnings:
+                        st.sidebar.warning("Imported with parser warnings: " + " ".join(str(w) for w in parser_warnings))
+
+                    if parser_stats:
+                        with st.sidebar.expander("Parser details", expanded=False):
+                            st.json(parser_stats)
+
+                    st.rerun()
+
+                except Exception as exc:
+                    st.sidebar.error(f"Could not import opponent report: {exc}")
+
+        return render_opponent_defense_level_control()
 
     report_labels = []
     report_by_label = {}
@@ -389,46 +414,8 @@ def render_opponent_scouting_panel() -> None:
         list(selected_report.get("pitchers", []) or [])
     )
 
-    with st.sidebar.expander("Manage saved opponent report", expanded=False):
-        st.caption(
-            "Deleting removes this scouting report from the current team. "
-            "This cannot be undone."
-        )
-
-        confirm_delete = st.checkbox(
-            "Yes, delete this opponent report",
-            key=f"confirm_delete_opponent_report_{selected_report.get('opponent_report_id', 'report')}",
-        )
-
-        if st.button(
-                "Delete Opponent Report",
-                use_container_width=True,
-                disabled=not confirm_delete,
-                key=f"delete_opponent_report_{selected_report.get('opponent_report_id', 'report')}",
-        ):
-            try:
-                delete_opponent_report(
-                    st.session_state.optimizer_session_id,
-                    opponent_report_id=str(selected_report["opponent_report_id"]),
-                )
-                st.success("Opponent report deleted.")
-                st.rerun()
-            except Exception as exc:
-                st.error(f"Could not delete opponent report: {exc}")
-
     parser_warnings = list(selected_report.get("parser_warnings", []) or [])
     parser_stats = dict(selected_report.get("parser_stats", {}) or {})
-
-    if parser_warnings:
-        st.sidebar.warning(
-            "Parser warning: " + " ".join(str(w) for w in parser_warnings)
-        )
-
-    with st.sidebar.expander("Opponent report parser details", expanded=False):
-        if parser_stats:
-            st.json(parser_stats)
-        else:
-            st.caption("No parser diagnostics saved for this report.")
 
     if not pitchers:
         st.session_state[f"use_opponent_context_{team_key}"] = False
@@ -436,7 +423,7 @@ def render_opponent_scouting_panel() -> None:
             "This opponent report has no usable pitcher profiles with real pitching workload. "
             "Using generic opponent settings instead."
         )
-        return
+        return render_opponent_defense_level_control()
 
     pitcher_names = [str(p.get("name", "Unknown pitcher")) for p in pitchers]
 
@@ -470,7 +457,23 @@ def render_opponent_scouting_panel() -> None:
             st.sidebar.error(f"Could not select opponent pitcher: {exc}")
 
     st.sidebar.markdown(
-        f"**{selected_pitcher.get('label', 'Pitcher profile')}**"
+        f"""
+        <div style="
+            border: 1px solid rgba(255,255,255,.22);
+            border-radius: .7rem;
+            padding: .65rem .75rem;
+            margin: .45rem 0 .55rem 0;
+            background: rgba(255,255,255,.06);
+        ">
+            <div style="font-size:.72rem; opacity:.72; font-weight:700; text-transform:uppercase;">
+                Pitcher profile
+            </div>
+            <div style="font-size:1.05rem; font-weight:850; line-height:1.25; margin-top:.15rem;">
+                {selected_pitcher.get('label', 'Pitcher profile')}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
     k_rate_text = f"{float(selected_pitcher.get('k_rate', 0.0)):.1%}"
@@ -514,15 +517,38 @@ def render_opponent_scouting_panel() -> None:
     ip = float(selected_pitcher.get("innings_pitched", 0.0) or 0.0)
     bf = int(selected_pitcher.get("batters_faced", 0) or 0)
 
-    if sample_size in {"Low", "Medium"}:
+    if sample_size == "Low":
         st.sidebar.warning(
             f"{sample_text} data sample: {ip:.1f} IP, {bf} batters faced. "
             "Use this as a scouting hint and combine it with coach judgment."
         )
+    elif sample_size == "Medium":
+        st.sidebar.caption(
+            f"Medium sample: {ip:.1f} IP / {bf} BF — good directional read; "
+            "confirm with coach judgment."
+        )
 
     scouting_note = selected_pitcher.get("scouting_note")
     if scouting_note:
-        st.sidebar.info(str(scouting_note))
+        st.sidebar.markdown(
+            f"""
+            <div style="
+                border: 1px solid rgba(128,128,128,.22);
+                border-radius: .6rem;
+                padding: .55rem .65rem;
+                margin: .45rem 0 .65rem 0;
+                background: rgba(128,128,128,.045);
+            ">
+                <div style="font-size:.72rem; opacity:.68; font-weight:700;">
+                    Coach read:
+                </div>
+                <div style="font-size:.82rem; opacity:.86; line-height:1.35; margin-top:.18rem;">
+                    {str(scouting_note)}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     defense_level = selected_report.get("derived_opponent_level", "average")
     fielding_pct = selected_report.get("fielding_pct")
@@ -531,6 +557,120 @@ def render_opponent_scouting_panel() -> None:
         st.sidebar.caption(
             f"Opponent defense: {float(fielding_pct):.3f} FP → {str(defense_level).title()} level"
         )
+
+    opponent_level_label = render_opponent_defense_level_control(
+        str(defense_level).title()
+    )
+
+    with st.sidebar.expander("Add or change opponent report", expanded=False):
+        uploaded_pdf = st.file_uploader(
+            "MaxPreps PDF",
+            type=["pdf"],
+            key=f"opponent_maxpreps_pdf_{st.session_state.get('selected_team_id', 'no_team')}",
+            help="Upload the printable MaxPreps baseball stats PDF for the opposing team.",
+        )
+
+        if uploaded_pdf is not None:
+            if st.button(
+                "Import Opponent Report",
+                use_container_width=True,
+                key=f"import_opponent_report_{st.session_state.get('selected_team_id', 'no_team')}",
+            ):
+                try:
+                    pdf_path = save_uploaded_file(
+                        uploaded_pdf,
+                        target_name=f"opponent_{Path(uploaded_pdf.name).name}",
+                    )
+
+                    payload = import_opponent_maxpreps_pdf(
+                        st.session_state.optimizer_session_id,
+                        pdf_path=pdf_path,
+                        source_file_name=Path(uploaded_pdf.name).name,
+                    )
+
+                    st.success(
+                        f"Imported {payload.get('team_name', 'opponent')} "
+                        f"with {len(payload.get('pitchers', []) or [])} pitcher profiles."
+                    )
+
+                    parser_warnings = list(payload.get("parser_warnings", []) or [])
+                    parser_stats = dict(payload.get("parser_stats", {}) or {})
+
+                    if parser_warnings:
+                        st.warning("Imported with parser warnings: " + " ".join(str(w) for w in parser_warnings))
+
+                    if parser_stats:
+                        with st.expander("Parser details", expanded=False):
+                            st.json(parser_stats)
+
+                    st.rerun()
+
+                except Exception as exc:
+                    st.error(f"Could not import opponent report: {exc}")
+
+    with st.sidebar.expander("Manage saved opponent report", expanded=False):
+        st.caption(
+            "Deleting removes this scouting report from the current team. "
+            "This cannot be undone."
+        )
+
+        confirm_delete = st.checkbox(
+            "Yes, delete this opponent report",
+            key=f"confirm_delete_opponent_report_{selected_report.get('opponent_report_id', 'report')}",
+        )
+
+        if st.button(
+                "Delete Opponent Report",
+                use_container_width=True,
+                disabled=not confirm_delete,
+                key=f"delete_opponent_report_{selected_report.get('opponent_report_id', 'report')}",
+        ):
+            try:
+                delete_opponent_report(
+                    st.session_state.optimizer_session_id,
+                    opponent_report_id=str(selected_report["opponent_report_id"]),
+                )
+                st.success("Opponent report deleted.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Could not delete opponent report: {exc}")
+
+    pitching_rows_parsed = (
+        parser_stats.get("pitching_rows_parsed")
+        or parser_stats.get("pitching_rows")
+        or parser_stats.get("pitching_rows_seen")
+    )
+    pitching_rows_skipped = (
+        parser_stats.get("pitching_rows_skipped")
+        or parser_stats.get("skipped_pitching_rows")
+        or parser_stats.get("pitching_rows_ignored")
+    )
+    parser_status = "Imported with parser notes" if parser_warnings else (
+        "Imported successfully" if parser_stats or pitchers else None
+    )
+
+    diagnostic_rows = []
+    if pitchers:
+        diagnostic_rows.append(f"- Pitchers loaded: **{len(pitchers)}**")
+    if _has_present_diagnostic_value(pitching_rows_parsed):
+        diagnostic_rows.append(f"- Pitching rows parsed: **{pitching_rows_parsed}**")
+    if _has_present_diagnostic_value(pitching_rows_skipped):
+        diagnostic_rows.append(f"- Pitching rows skipped: **{pitching_rows_skipped}**")
+    if _has_present_diagnostic_value(parser_status):
+        diagnostic_rows.append(f"- Source/parser status: **{parser_status}**")
+
+    if diagnostic_rows or parser_warnings:
+        with st.sidebar.expander("Advanced opponent scouting details", expanded=False):
+            st.caption("Opponent report import summary.")
+            if diagnostic_rows:
+                st.markdown("\n".join(diagnostic_rows))
+
+            if parser_warnings:
+                st.caption("Parser notes:")
+                for warning in parser_warnings:
+                    st.caption(f"- {warning}")
+
+    return opponent_level_label
 
 
 def render_sidebar(session_state: SessionStateSchema) -> dict:
@@ -662,11 +802,7 @@ def render_sidebar(session_state: SessionStateSchema) -> dict:
             key=f"leadoffs_allowed_{preset_key}",
         )
 
-    st.sidebar.markdown("---")
-
-    render_opponent_scouting_panel()
-
-    st.sidebar.markdown("---")
+    opponent_level_label = render_opponent_scouting_panel()
 
     active_opponent_context = get_active_opponent_context(
         st.session_state.optimizer_session_id
@@ -692,49 +828,13 @@ def render_sidebar(session_state: SessionStateSchema) -> dict:
         active_opponent_context = None
 
     if not active_opponent_context and opponent_source != "Manual Pitcher":
-        st.sidebar.markdown("## ⚙️ Opponent Context")
-
-        opposing_pitching_label = st.sidebar.selectbox(
-            "Opponent Pitcher Type",
-            [
-                "Balanced",
-                "Power Arm",
-                "Crafty",
-                "Wild",
-            ],
-            index=0,
-            help=(
-                "Select the type of pitcher you expect to face. "
-                "The optimizer will adjust lineup performance based on this matchup."
-            ),
-        )
-
-        opponent_level_label = st.sidebar.selectbox(
-            "Opponent Level",
-            ["Weak", "Average", "Strong"],
-            index=1,
-        )
+        opposing_pitching_label = "Balanced"
 
     elif active_opponent_context:
-        pitcher = active_opponent_context.get("pitcher") or {}
-        report = active_opponent_context.get("report") or {}
-
         opposing_pitching_label = "Balanced"
-        opponent_level_label = str(
-            report.get("derived_opponent_level") or "average"
-        ).title()
-
-        st.sidebar.caption(
-            "Using imported opponent scouting report instead of manual opponent controls."
-        )
 
     else:
         opposing_pitching_label = "Balanced"
-        opponent_level_label = "Average"
-
-        st.sidebar.caption(
-            "Using manually defined opposing pitcher instead of generic opponent controls."
-        )
 
     st.sidebar.markdown("---")
 
@@ -888,13 +988,6 @@ def render_sidebar(session_state: SessionStateSchema) -> dict:
     if active_opponent_context:
         active_report = active_opponent_context.get("report") or {}
         active_pitcher = active_opponent_context.get("pitcher") or {}
-
-        derived_level = str(
-            active_report.get("derived_opponent_level") or "average"
-        ).title()
-
-        if derived_level in opponent_level_lookup:
-            rules_config["opponent_level"] = opponent_level_lookup[derived_level]
 
         rules_config["use_opponent_scouting"] = True
         rules_config["opponent_pitcher_name"] = active_pitcher.get("name")
