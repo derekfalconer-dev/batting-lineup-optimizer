@@ -330,47 +330,55 @@ def render_team_switcher() -> None:
         st.session_state.team_selector_dropdown = selected_team_name
         st.session_state.sync_team_selector_dropdown = False
 
+    active_team = manager.get_workspace_team_for_session(
+        st.session_state.optimizer_session_id
+    )
+    has_active_team = bool(getattr(active_team, "team_id", None))
+    team_controls_expanded = (
+        not has_active_team
+        or bool(st.session_state.get("show_team_loader"))
+    )
+
     with st.container(border=True):
         st.markdown("### Team")
-        top_col1, top_col2 = st.columns([2.2, 1.8])
 
-        with top_col1:
-            chosen_name = st.selectbox(
-                "Active team",
-                options=team_names,
-                key="team_selector_dropdown",
+        chosen_name = st.selectbox(
+            "Active team",
+            options=team_names,
+            key="team_selector_dropdown",
+        )
+
+        chosen_team_id = team_ids_by_name[chosen_name]
+
+        if chosen_team_id != selected_team_id:
+            manager.flush_session_team(st.session_state.optimizer_session_id)
+            manager.attach_session_to_team(
+                st.session_state.optimizer_session_id,
+                team_id=chosen_team_id,
             )
 
-            chosen_team_id = team_ids_by_name[chosen_name]
+            from core.analytics import safe_log_event
 
-            if chosen_team_id != selected_team_id:
-                manager.flush_session_team(st.session_state.optimizer_session_id)
-                manager.attach_session_to_team(
-                    st.session_state.optimizer_session_id,
-                    team_id=chosen_team_id,
-                )
+            safe_log_event(
+                event_type="team_loaded",
+                user_id=current_user.user_id,
+                user_email=current_user.email,
+                session_id=st.session_state.optimizer_session_id,
+                team_id=chosen_team_id,
+                metadata={
+                    "team_name": chosen_name,
+                    "load_reason": "team_switcher",
+                },
+            )
 
-                from core.analytics import safe_log_event
+            st.session_state.selected_team_id = chosen_team_id
+            st.session_state.sync_team_selector_dropdown = True
 
-                safe_log_event(
-                    event_type="team_loaded",
-                    user_id=current_user.user_id,
-                    user_email=current_user.email,
-                    session_id=st.session_state.optimizer_session_id,
-                    team_id=chosen_team_id,
-                    metadata={
-                        "team_name": chosen_name,
-                        "load_reason": "team_switcher",
-                    },
-                )
+            reset_team_scoped_ui_state()
+            st.rerun()
 
-                st.session_state.selected_team_id = chosen_team_id
-                st.session_state.sync_team_selector_dropdown = True
-
-                reset_team_scoped_ui_state()
-                st.rerun()
-
-        with top_col2:
+        with st.expander("Create, rename, or delete team", expanded=team_controls_expanded):
+            st.caption("Team management tools.")
             if st.session_state.get("clear_new_team_name_input"):
                 st.session_state.new_team_name_input = ""
                 st.session_state.clear_new_team_name_input = False
@@ -442,19 +450,20 @@ def render_team_switcher() -> None:
                     st.success(f"Created team: {cleaned}")
                     st.rerun()
 
-        active_team = manager.get_workspace_team_for_session(
-            st.session_state.optimizer_session_id
-        )
-        st.caption(f"Current team: {active_team.team_name}")
+            st.divider()
 
-        with st.expander("Manage active team", expanded=False):
             rename_col1, rename_col2 = st.columns([2, 1])
 
             with rename_col1:
+                rename_key = "rename_team_name_input"
+                rename_team_id_key = "rename_team_name_input_team_id"
+                if st.session_state.get(rename_team_id_key) != active_team.team_id:
+                    st.session_state[rename_key] = active_team.team_name
+                    st.session_state[rename_team_id_key] = active_team.team_id
+
                 rename_value = st.text_input(
                     "Rename team",
-                    value=active_team.team_name,
-                    key="rename_team_name_input",
+                    key=rename_key,
                 )
 
             with rename_col2:

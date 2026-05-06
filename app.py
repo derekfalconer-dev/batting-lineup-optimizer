@@ -4347,6 +4347,16 @@ def main() -> None:
     )
 
     inject_custom_styles()
+    st.markdown(
+        """
+        <style>
+            .block-container {
+                padding-top: 1rem;
+            }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
     ensure_ui_state()
     require_authenticated_user()
