@@ -2648,22 +2648,60 @@ def render_coach_lab_comparison_section(
         if getattr(scenario, "result", None) is not None
     ]
 
-    include_live_custom = st.checkbox(
-        "Include current unsaved custom lineup",
-        value=True,
-        key="coach_lab_include_live_custom",
-        help="Turn this off only if you do not want the current unsaved custom lineup included in the comparison charts.",
-    )
+    SCENARIO_SELECT_KEY = "coach_lab_compare_selected_scenarios"
+    DEFAULT_COMPARE_SCENARIOS = 3
+    MAX_COMPARE_SCENARIOS = 5
+
+    control_cols = st.columns([2.3, 1, 1, 2.4])
+
+    with control_cols[0]:
+        include_live_custom = st.checkbox(
+            "Include current unsaved custom lineup",
+            value=True,
+            key="coach_lab_include_live_custom",
+            help="Turn this off only if you do not want the current unsaved custom lineup included in the comparison charts.",
+        )
+
+    default_saved_names = available_saved_names[-DEFAULT_COMPARE_SCENARIOS:]
+
+    # Streamlit preserves widget state across reruns, so sanitize stale selections
+    # before rendering the multiselect. This prevents old sessions from plotting
+    # every saved scenario by default.
+    existing_selected_names = st.session_state.get(SCENARIO_SELECT_KEY)
+
+    if existing_selected_names is None:
+        st.session_state[SCENARIO_SELECT_KEY] = default_saved_names
+    else:
+        st.session_state[SCENARIO_SELECT_KEY] = [
+                                                    name
+                                                    for name in existing_selected_names
+                                                    if name in available_saved_names
+                                                ][:MAX_COMPARE_SCENARIOS]
+
+    with control_cols[1]:
+        if st.button(
+                "Select latest 5",
+                key="coach_lab_select_latest_5_scenarios",
+                use_container_width=True,
+        ):
+            st.session_state[SCENARIO_SELECT_KEY] = available_saved_names[-MAX_COMPARE_SCENARIOS:]
+            st.rerun()
+
+    with control_cols[2]:
+        if st.button(
+                "Clear selection",
+                key="coach_lab_clear_selected_scenarios",
+                use_container_width=True,
+        ):
+            st.session_state[SCENARIO_SELECT_KEY] = []
+            st.rerun()
 
     selected_saved_names = st.multiselect(
         "Saved scenarios to compare",
         options=available_saved_names,
-        default=available_saved_names,
-        key="coach_lab_compare_selected_scenarios",
-        help="Saved scenarios are included by default. Remove any lines you do not want to compare.",
+        key=SCENARIO_SELECT_KEY,
+        help="Choose the saved scenarios to include in the comparison charts.",
     )
-
-    MAX_COMPARE_SCENARIOS = 5
 
     if len(selected_saved_names) > MAX_COMPARE_SCENARIOS:
         st.warning(
