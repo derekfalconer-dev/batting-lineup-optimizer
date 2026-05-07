@@ -57,6 +57,8 @@ from ui.team_entry import (
 
 from ui.sidebar import render_sidebar
 
+from ui.pitcher_matchup_report import render_pitcher_matchup_report_panel
+
 from core.models import (
     RulesConfig,
     GameStrategy,
@@ -134,6 +136,10 @@ from core.schemas import (
 
 APP_TITLE = "Batting Lineup Optimizer"
 APP_SUBTITLE = "Lineup optimization for baseball coaches"
+
+# Dev-only feature flag. Keep OFF unless testing locally on the spike branch.
+ENABLE_PITCHER_MATCHUP_REPORT = False
+
 NUDGE_TOOLTIP_BY_FIELD = {
     "contact": "Small adjustment to how often the hitter puts the ball in play and reaches safely. Higher values usually mean more balls in play, more hits, and fewer strikeouts.",
     "power": "Small adjustment to extra-base hit and home run upside. Higher values increase damage potential when the hitter connects.",
@@ -4612,6 +4618,9 @@ def main() -> None:
 
     run_settings = render_sidebar(backend_session)
     render_signed_in_banner()
+
+    if ENABLE_PITCHER_MATCHUP_REPORT:
+        render_pitcher_matchup_report_panel()
 
     if not _has_pitcher_matchup_context(run_settings.get("rules_config", {}) or {}):
         st.session_state.matchup_impact_generic_baseline = None
