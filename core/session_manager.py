@@ -82,6 +82,7 @@ class SavedScenario:
 
     lineup_names: list[str] = field(default_factory=list)
     adjustments_by_name: dict[str, dict[str, float]] = field(default_factory=dict)
+    scenario_setup: dict[str, Any] = field(default_factory=dict)
 
     # Raw evaluation payload for now.
     # Later we can replace this with a formal schema.
@@ -253,6 +254,7 @@ class SessionManager:
             "name": s.name,
             "lineup_names": list(s.lineup_names),
             "adjustments_by_name": s.adjustments_by_name,
+            "scenario_setup": dict(s.scenario_setup),
             "result": safe_result,
             "created_at": s.created_at,
             "updated_at": s.updated_at,
@@ -264,6 +266,7 @@ class SessionManager:
             name=str(data["name"]),
             lineup_names=list(data.get("lineup_names", [])),
             adjustments_by_name=dict(data.get("adjustments_by_name", {})),
+            scenario_setup=dict(data.get("scenario_setup", {}) or {}),
             result=data.get("result"),
             created_at=float(data.get("created_at", __import__("time").time())),
             updated_at=float(data.get("updated_at", __import__("time").time())),
@@ -1030,6 +1033,7 @@ class SessionManager:
             name: str,
             lineup_names: list[str],
             adjustments_by_name: dict[str, dict[str, float]] | None = None,
+            scenario_setup: dict[str, Any] | None = None,
             result: dict[str, Any] | None = None,
     ) -> SavedScenario:
         session = self.get_session(session_id)
@@ -1043,6 +1047,7 @@ class SessionManager:
                 str(player): {str(k): float(v) for k, v in values.items()}
                 for player, values in (adjustments_by_name or {}).items()
             },
+            scenario_setup=dict(scenario_setup or {}),
             result=result,
         )
 

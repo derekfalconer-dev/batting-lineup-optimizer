@@ -510,6 +510,7 @@ def render_absent_player_shock_panel(run_settings: dict) -> None:
                         )
 
                         st.session_state.coach_lab_workspace_mode = "custom"
+                        st.session_state.coach_lab_last_scenario_type = "Absent-player shock suggested lineup"
                         clear_lineup_order_widget_state()
                         st.session_state.scroll_to_active_batting_order = True
 
@@ -2663,6 +2664,139 @@ def build_chart_compare_set(
     return deduped
 
 
+def build_scenario_setup_snapshot(
+    run_settings: dict,
+    *,
+    scenario_type: str,
+) -> dict:
+    scenario_context = dict(run_settings.get("scenario_context", {}) or {})
+    rules_config = dict(run_settings.get("rules_config", {}) or {})
+
+    opponent_source = str(scenario_context.get("opponent_source") or "").strip()
+    if not opponent_source:
+        if rules_config.get("use_manual_opponent_pitcher"):
+            opponent_source = "Manual Pitcher"
+        elif rules_config.get("use_opponent_scouting"):
+            opponent_source = "MaxPreps Report"
+        else:
+            opponent_source = "Generic"
+
+    opponent_summary = str(scenario_context.get("opponent_summary") or "").strip()
+    if not opponent_summary:
+        if opponent_source == "Manual Pitcher":
+            opponent_summary = "Manual Pitcher"
+        elif opponent_source == "MaxPreps Report":
+            opponent_summary = str(rules_config.get("opponent_pitcher_name") or "MaxPreps pitcher")
+        else:
+            opponent_summary = "Generic baseline"
+
+    rules_summary = str(scenario_context.get("rules_summary") or "").strip()
+    if not rules_summary:
+        innings = int(rules_config.get("innings", 0) or 0)
+        rules_summary = (
+            f"{innings} innings, "
+            f"{'continuous batting' if rules_config.get('continuous_batting') else 'standard lineup'}, "
+            f"{'leadoffs on' if rules_config.get('leadoffs_allowed') else 'leadoffs off'}, "
+            f"{int(rules_config.get('base_distance_ft', 0) or 0)} ft bases"
+        )
+
+    return {
+        "scenario_type": str(scenario_type or "Simulated custom lineup"),
+        "opponent_source": opponent_source,
+        "opponent_summary": opponent_summary,
+        "pitcher_summary": str(
+            scenario_context.get("pitcher_summary")
+            or rules_config.get("opponent_pitcher_label")
+            or opponent_summary
+        ),
+        "pitcher_details": dict(scenario_context.get("pitcher_details", {}) or {}),
+        "defense_level": str(
+            scenario_context.get("defense_level")
+            or run_settings.get("opponent_level")
+            or rules_config.get("opponent_level")
+            or "Average"
+        ),
+        "defense_summary": str(
+            scenario_context.get("defense_summary")
+            or scenario_context.get("defense_level")
+            or run_settings.get("opponent_level")
+            or "Average"
+        ),
+        "rules_preset": str(scenario_context.get("rules_preset") or "Unknown"),
+        "rules_summary": rules_summary,
+        "rules_details": dict(scenario_context.get("rules_details", {}) or {}),
+    }
+
+
+def format_setup_rate(value: object) -> str | None:
+    if value in (None, "", "—"):
+        return None
+
+    try:
+        return f"{float(value):.1%}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def render_scenario_setup_expander(scenario) -> None:
+    setup = getattr(scenario, "scenario_setup", None)
+
+    with st.expander("Show scenario setup", expanded=False):
+        if not isinstance(setup, dict) or not setup:
+            st.caption("Setup details were not captured for this older scenario.")
+            return
+
+        st.markdown("**Game setup**")
+        st.write(f"- Type: {setup.get('scenario_type', 'Scenario')}")
+        st.write(f"- Rules: {setup.get('rules_summary') or setup.get('rules_preset') or 'Not captured'}")
+        st.write(f"- Opponent: {setup.get('opponent_summary') or setup.get('opponent_source') or 'Not captured'}")
+
+        pitcher_summary = setup.get("pitcher_summary")
+        pitcher_details = setup.get("pitcher_details") if isinstance(setup.get("pitcher_details"), dict) else {}
+        opponent_source = str(setup.get("opponent_source") or "")
+
+        if opponent_source == "MaxPreps Report":
+            profile_bits = []
+            if pitcher_summary:
+                profile_bits.append(str(pitcher_summary))
+
+            k_rate = format_setup_rate(pitcher_details.get("k_rate"))
+            bb_rate = format_setup_rate(pitcher_details.get("bb_rate"))
+            sample_size = pitcher_details.get("sample_size")
+
+            if k_rate:
+                profile_bits.append(f"{k_rate} K")
+            if bb_rate:
+                profile_bits.append(f"{bb_rate} BB")
+            if sample_size:
+                profile_bits.append(f"{str(sample_size).lower()} sample")
+
+            if profile_bits:
+                st.write(f"- Pitcher profile: {', '.join(profile_bits)}")
+
+        elif opponent_source == "Manual Pitcher":
+            trait_bits = []
+            for label, field in [
+                ("Velocity", "velocity"),
+                ("K", "strikeout_ability"),
+                ("BB", "control_walk_rate"),
+                ("Contact allowed", "contact_allowed"),
+            ]:
+                value = pitcher_details.get(field)
+                if value not in (None, "", "—"):
+                    trait_bits.append(f"{label}: {value}")
+
+            if pitcher_summary:
+                st.write(f"- Pitcher profile: {pitcher_summary}")
+            if trait_bits:
+                st.write(f"- Pitcher traits: {', '.join(trait_bits)}")
+
+        elif pitcher_summary:
+            st.write(f"- Pitcher profile: {pitcher_summary}")
+
+        st.write(f"- Defense: {setup.get('defense_summary') or setup.get('defense_level') or 'Not captured'}")
+
+
 def render_coach_lab_comparison_section(
     *,
     results: WorkflowResponseSchema | None,
@@ -3116,6 +3250,8 @@ def render_saved_scenarios_panel() -> None:
             else:
                 st.caption("No saved simulation result attached yet.")
 
+            render_scenario_setup_expander(scenario)
+
             if scenario.lineup_names:
                 with st.expander("Show batting order"):
                     for idx, name in enumerate(scenario.lineup_names, start=1):
@@ -3199,6 +3335,137 @@ def render_custom_lineup_result(
         c6.metric(f"Current chance of {target_runs:.0f}+", "—")
 
 
+def render_save_scenario_workflow(
+    *,
+    run_settings: dict,
+    continuous_batting: bool,
+    lineup_size: int,
+) -> None:
+    custom_eval_payload = st.session_state.get("coach_lab_last_custom_eval")
+    if not isinstance(custom_eval_payload, dict) or not custom_eval_payload.get("custom_lineup"):
+        return
+
+    saved_scenarios = get_saved_scenarios_for_ui()
+    next_scenario_number = len(saved_scenarios) + 1
+
+    st.markdown("#### Save this result for comparison charts")
+
+    last_save_message = st.session_state.get("coach_lab_last_save_success_message")
+    if last_save_message:
+        st.success(str(last_save_message))
+
+    save_cols = st.columns([2.5, 1])
+
+    with save_cols[0]:
+        scenario_name = st.text_input(
+            "Scenario name",
+            value=f"Scenario {next_scenario_number}",
+            key="dashboard_scenario_name",
+        )
+
+    with save_cols[1]:
+        st.markdown("<div style='height: 1.8rem;'></div>", unsafe_allow_html=True)
+
+        if st.button(
+                "Save Scenario for Charts",
+                use_container_width=True,
+                key="dashboard_save_scenario",
+        ):
+            try:
+                latest_lineup_names = get_current_active_lineup_names(
+                    get_editable_roster_for_ui(),
+                    continuous_batting=continuous_batting,
+                    lineup_size=lineup_size,
+                )
+
+                set_custom_lineup(
+                    st.session_state.optimizer_session_id,
+                    lineup_names=latest_lineup_names,
+                )
+
+                saved_name = scenario_name.strip() or f"Scenario {next_scenario_number}"
+
+                simulation_games = int(run_settings["optimizer_config"]["refine_games"])
+
+                cached_eval = st.session_state.get("coach_lab_last_custom_eval")
+                cached_lineup = None
+                if cached_eval and isinstance(cached_eval, dict):
+                    cached_custom = cached_eval.get("custom_lineup") or {}
+                    cached_lineup = list(cached_custom.get("lineup", []))
+
+                if cached_lineup == latest_lineup_names and cached_eval is not None:
+                    custom_eval = cached_eval
+
+                    set_custom_lineup_result_payload(
+                        st.session_state.optimizer_session_id,
+                        result_payload=custom_eval,
+                    )
+                else:
+                    custom_eval = evaluate_custom_lineup(
+                        st.session_state.optimizer_session_id,
+                        target_runs=run_settings["target_runs"],
+                        n_games=simulation_games,
+                        seed=run_settings["optimizer_config"]["seed"],
+                        display_name=saved_name,
+                        rules=RulesConfig(**run_settings["rules_config"]),
+                    )
+
+                if custom_eval is not None:
+                    st.session_state.coach_lab_last_custom_eval = custom_eval
+
+                scenario_type = str(
+                    st.session_state.get("coach_lab_last_scenario_type")
+                    or (
+                        "Optimized current roster"
+                        if st.session_state.get("coach_lab_workspace_mode") == "optimized"
+                        else "Simulated custom lineup"
+                    )
+                )
+
+                scenario_setup = build_scenario_setup_snapshot(
+                    run_settings,
+                    scenario_type=scenario_type,
+                )
+
+                save_current_scenario(
+                    st.session_state.optimizer_session_id,
+                    name=saved_name,
+                    scenario_setup=scenario_setup,
+                )
+
+                live_eval = st.session_state.get("coach_lab_last_custom_eval")
+                if isinstance(live_eval, dict):
+                    custom_block = live_eval.get("custom_lineup")
+                    if isinstance(custom_block, dict):
+                        custom_block["display_name"] = str(saved_name)
+                        st.session_state.coach_lab_last_custom_eval = live_eval
+
+                st.session_state.coach_lab_include_live_custom = False
+                selected_compare_names = list(st.session_state.get("coach_lab_compare_selected_scenarios", []))
+                st.session_state.coach_lab_compare_selected_scenarios = (
+                    [name for name in selected_compare_names if name != saved_name] + [saved_name]
+                )[-5:]
+                st.session_state.pitcher_stress_signature_scenario = saved_name
+                st.session_state.rally_ignition_signature_scenario = saved_name
+
+                existing = st.session_state.get("coach_lab_saved_scenario_messages", [])
+                existing.append(f"Saved scenario: {saved_name}")
+                st.session_state.coach_lab_saved_scenario_messages = existing[-12:]
+                st.session_state.coach_lab_last_save_success_message = (
+                    f"Saved scenario: {saved_name}. It now appears in the comparison charts below."
+                )
+
+                set_run_status_tile(
+                    kind="success",
+                    title="Scenario saved",
+                    detail=f"Saved scenario: {saved_name}. It now appears in the comparison charts below.",
+                )
+
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Could not save scenario: {exc}")
+
+
 def render_coach_lab(
     results: WorkflowResponseSchema | None,
     run_settings: dict,
@@ -3217,9 +3484,6 @@ def render_coach_lab(
         continuous_batting=continuous_batting,
         lineup_size=lineup_size,
     ) if editable_profiles else []
-
-    saved_scenarios = get_saved_scenarios_for_ui()
-    next_scenario_number = len(saved_scenarios) + 1
 
     current_lineup_name_set = set(current_lineup_names)
     lineup_profiles = [p for p in active_profiles if p.name in current_lineup_name_set]
@@ -3329,6 +3593,7 @@ def render_coach_lab(
                             st.session_state.matchup_impact_generic_baseline = generic_same_lineup_result
 
                             st.session_state.coach_lab_workspace_mode = "optimized"
+                            st.session_state.coach_lab_last_scenario_type = "Optimized current roster"
                             st.session_state.coach_lab_include_live_custom = True
                             st.session_state.pitcher_stress_signature_scenario = "Current Unsaved Custom Order"
                             st.session_state.rally_ignition_signature_scenario = "Current Unsaved Custom Order"
@@ -3352,6 +3617,11 @@ def render_coach_lab(
                                 kind="success",
                                 title="Roster optimization",
                                 detail=summary["detail"],
+                            )
+
+                            st.session_state.scroll_to_lineup_results = True
+                            st.session_state.lineup_results_scroll_token = (
+                                int(st.session_state.get("lineup_results_scroll_token", 0)) + 1
                             )
 
                             clear_lineup_order_widget_state()
@@ -3403,6 +3673,7 @@ def render_coach_lab(
 
                             st.session_state.coach_lab_last_custom_eval = custom_eval
                             st.session_state.coach_lab_workspace_mode = "custom"
+                            st.session_state.coach_lab_last_scenario_type = "Simulated custom lineup"
                             st.session_state.coach_lab_include_live_custom = True
                             st.session_state.pitcher_stress_signature_scenario = "Current Unsaved Custom Order"
                             st.session_state.rally_ignition_signature_scenario = "Current Unsaved Custom Order"
@@ -3432,6 +3703,11 @@ def render_coach_lab(
                                 kind="success",
                                 title="Custom lineup simulation",
                                 detail=summary["detail"],
+                            )
+
+                            st.session_state.scroll_to_lineup_results = True
+                            st.session_state.lineup_results_scroll_token = (
+                                int(st.session_state.get("lineup_results_scroll_token", 0)) + 1
                             )
 
                         st.rerun()
@@ -3501,99 +3777,9 @@ def render_coach_lab(
                     "is absent using large-scale simulation."
                 )
 
-            st.markdown("---")
-            save_cols = st.columns([2, 1])
-
-            with save_cols[0]:
-                scenario_name = st.text_input(
-                    "Scenario name",
-                    value=f"Scenario {next_scenario_number}",
-                    key="dashboard_scenario_name",
-                )
-
-            with save_cols[1]:
-                st.markdown("<div style='height: 1.8rem;'></div>", unsafe_allow_html=True)
-
-                if st.button(
-                        "Save Scenario for Charts",
-                        use_container_width=True,
-                        key="dashboard_save_scenario",
-                ):
-                    try:
-                        latest_lineup_names = get_current_active_lineup_names(
-                            get_editable_roster_for_ui(),
-                            continuous_batting=continuous_batting,
-                            lineup_size=lineup_size,
-                        )
-
-                        set_custom_lineup(
-                            st.session_state.optimizer_session_id,
-                            lineup_names=latest_lineup_names,
-                        )
-
-                        saved_name = scenario_name.strip() or f"Scenario {next_scenario_number}"
-
-                        simulation_games = int(run_settings["optimizer_config"]["refine_games"])
-
-                        cached_eval = st.session_state.get("coach_lab_last_custom_eval")
-                        cached_lineup = None
-                        if cached_eval and isinstance(cached_eval, dict):
-                            cached_custom = cached_eval.get("custom_lineup") or {}
-                            cached_lineup = list(cached_custom.get("lineup", []))
-
-                        if cached_lineup == latest_lineup_names and cached_eval is not None:
-                            custom_eval = cached_eval
-
-                            set_custom_lineup_result_payload(
-                                st.session_state.optimizer_session_id,
-                                result_payload=custom_eval,
-                            )
-                        else:
-                            custom_eval = evaluate_custom_lineup(
-                                st.session_state.optimizer_session_id,
-                                target_runs=run_settings["target_runs"],
-                                n_games=simulation_games,
-                                seed=run_settings["optimizer_config"]["seed"],
-                                display_name=saved_name,
-                                rules=RulesConfig(**run_settings["rules_config"]),
-                            )
-
-                        if custom_eval is not None:
-                            st.session_state.coach_lab_last_custom_eval = custom_eval
-
-                        save_current_scenario(
-                            st.session_state.optimizer_session_id,
-                            name=saved_name,
-                        )
-
-                        live_eval = st.session_state.get("coach_lab_last_custom_eval")
-                        if isinstance(live_eval, dict):
-                            custom_block = live_eval.get("custom_lineup")
-                            if isinstance(custom_block, dict):
-                                custom_block["display_name"] = str(saved_name)
-                                st.session_state.coach_lab_last_custom_eval = live_eval
-
-                        st.session_state.coach_lab_include_live_custom = False
-                        selected_compare_names = list(st.session_state.get("coach_lab_compare_selected_scenarios", []))
-                        st.session_state.coach_lab_compare_selected_scenarios = (
-                            [name for name in selected_compare_names if name != saved_name] + [saved_name]
-                        )[-5:]
-                        st.session_state.pitcher_stress_signature_scenario = saved_name
-                        st.session_state.rally_ignition_signature_scenario = saved_name
-
-                        existing = st.session_state.get("coach_lab_saved_scenario_messages", [])
-                        existing.append(f"Saved scenario: {saved_name}")
-                        st.session_state.coach_lab_saved_scenario_messages = existing[-12:]
-
-                        set_run_status_tile(
-                            kind="success",
-                            title="Scenario saved",
-                            detail=f"Saved scenario: {saved_name}. It now appears in the comparison charts below.",
-                        )
-
-                        st.rerun()
-                    except Exception as exc:
-                        st.error(f"Could not save scenario: {exc}")
+            st.caption(
+                "After running a simulation or optimization, you’ll jump to the result where you can save it for charts."
+            )
 
 
 
@@ -3742,6 +3928,21 @@ def render_coach_lab(
 
     render_model_limitations_panel()
 
+    st.markdown('<div id="lineup-results-and-charts"></div>', unsafe_allow_html=True)
+
+    scroll_token = int(st.session_state.get("lineup_results_scroll_token", 0))
+    if st.session_state.pop("scroll_to_lineup_results", False):
+        components.html(
+            f"""
+            <script>
+              const scrollToken = "{scroll_token}";
+              const el = window.parent.document.getElementById("lineup-results-and-charts");
+              if (el) el.scrollIntoView({{ behavior: "smooth", block: "start" }});
+            </script>
+            """,
+            height=0,
+        )
+
     baseline_results = results or st.session_state.get("last_completed_results")
 
     if baseline_results is not None:
@@ -3755,6 +3956,12 @@ def render_coach_lab(
         st.session_state.get("coach_lab_last_custom_eval"),
         optimized=baseline_results.optimized if baseline_results is not None else None,
         original=baseline_results.original if baseline_results is not None else None,
+    )
+
+    render_save_scenario_workflow(
+        run_settings=run_settings,
+        continuous_batting=continuous_batting,
+        lineup_size=lineup_size,
     )
 
     st.markdown("")

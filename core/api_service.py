@@ -1575,6 +1575,7 @@ def save_current_scenario(
     session_id: str,
     *,
     name: str,
+    scenario_setup: dict[str, Any] | None = None,
 ) -> SavedScenarioSchema:
     manager = get_session_manager()
     session = manager.get_session(session_id)
@@ -1616,6 +1617,7 @@ def save_current_scenario(
         name=name,
         lineup_names=session.custom_lineup_names,
         adjustments_by_name=team.coach_adjustments_by_name,
+        scenario_setup=scenario_setup,
         result=serializable_result,
     )
 

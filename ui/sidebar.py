@@ -1140,6 +1140,90 @@ def render_sidebar(session_state: SessionStateSchema) -> dict:
         "inning_run_limit": int(inning_run_limit) if use_inning_run_limit else None,
     }
 
+    run_limit_summary = (
+        f"{int(inning_run_limit)} run limit"
+        if use_inning_run_limit and inning_run_limit is not None
+        else "no run limit"
+    )
+    rules_summary = (
+        f"{rules_preset} — {int(innings_per_game)} innings, "
+        f"{'continuous batting' if continuous_batting else 'standard lineup'}, "
+        f"{'leadoffs on' if leadoffs_allowed else 'leadoffs off'}, "
+        f"{diamond_size}, {run_limit_summary}"
+    )
+
+    defense_summary = str(opponent_level_label)
+    if active_opponent_context:
+        active_report_for_setup = active_opponent_context.get("report") or {}
+        fielding_pct = active_report_for_setup.get("fielding_pct")
+        if fielding_pct is not None:
+            defense_summary = f"{defense_summary} ({float(fielding_pct):.3f} FP)"
+
+    if active_opponent_context:
+        active_report_for_setup = active_opponent_context.get("report") or {}
+        active_pitcher_for_setup = active_opponent_context.get("pitcher") or {}
+        report_name = str(active_report_for_setup.get("team_name") or "Opponent report")
+        pitcher_name = str(active_pitcher_for_setup.get("name") or "Selected pitcher")
+        pitcher_label = str(active_pitcher_for_setup.get("label") or "Pitcher profile")
+
+        scenario_context = {
+            "opponent_source": "MaxPreps Report",
+            "opponent_summary": f"MaxPreps — {report_name}, {pitcher_name}",
+            "pitcher_summary": pitcher_label,
+            "pitcher_details": {
+                "report_name": report_name,
+                "source_file_name": active_report_for_setup.get("source_file_name"),
+                "pitcher_name": pitcher_name,
+                "profile": pitcher_label,
+                "k_rate": active_pitcher_for_setup.get("k_rate"),
+                "bb_rate": active_pitcher_for_setup.get("bb_rate"),
+                "sample_size": active_pitcher_for_setup.get("confidence"),
+                "innings_pitched": active_pitcher_for_setup.get("innings_pitched"),
+                "batters_faced": active_pitcher_for_setup.get("batters_faced"),
+            },
+        }
+    elif opponent_source == "Manual Pitcher" and manual_pitcher_profile:
+        manual_hand = manual_pitcher_profile.get("hand")
+        hand_label = f"{manual_hand}HP" if manual_hand in {"R", "L"} else "Unknown hand"
+
+        scenario_context = {
+            "opponent_source": "Manual Pitcher",
+            "opponent_summary": f"Manual Pitcher — {hand_label}",
+            "pitcher_summary": str(manual_pitcher_profile.get("label") or "Manual pitcher profile"),
+            "pitcher_details": {
+                "name": manual_pitcher_profile.get("name"),
+                "hand": manual_hand,
+                "velocity": st.session_state.get(f"manual_pitcher_velo_{team_key}"),
+                "strikeout_ability": st.session_state.get(f"manual_pitcher_k_rate_{team_key}"),
+                "control_walk_rate": st.session_state.get(f"manual_pitcher_bb_rate_{team_key}"),
+                "contact_allowed": st.session_state.get(f"manual_pitcher_contact_{team_key}"),
+            },
+        }
+    else:
+        scenario_context = {
+            "opponent_source": "Generic",
+            "opponent_summary": "Generic baseline",
+            "pitcher_summary": "Generic baseline",
+            "pitcher_details": {},
+        }
+
+    scenario_context.update(
+        {
+            "defense_level": str(opponent_level_label),
+            "defense_summary": defense_summary,
+            "rules_preset": str(rules_preset),
+            "rules_summary": rules_summary,
+            "rules_details": {
+                "innings": int(innings_per_game),
+                "continuous_batting": bool(continuous_batting),
+                "leadoffs_allowed": bool(leadoffs_allowed),
+                "diamond_size": str(diamond_size),
+                "use_inning_run_limit": bool(use_inning_run_limit),
+                "inning_run_limit": int(inning_run_limit) if use_inning_run_limit else None,
+            },
+        }
+    )
+
     save_rules_for_active_team(
         rules_preset=rules_preset,
         rules_config=saved_team_rules_config,
@@ -1154,6 +1238,7 @@ def render_sidebar(session_state: SessionStateSchema) -> dict:
         "opposing_pitching": opposing_pitching_label,
         "opponent_level": opponent_level_label,
         "rules_config": rules_config,
+        "scenario_context": scenario_context,
         "optimizer_config": {
             "mode": mode,
             "search_games": int(search_games),
