@@ -7,6 +7,37 @@ from typing import Any
 
 
 @dataclass(slots=True)
+class MaxPrepsBattingRow:
+    number: str
+    name: str
+    grade: str | None = None
+
+    games_played: int | None = None
+    avg: float | None = None
+    plate_appearances: int | None = None
+    at_bats: int | None = None
+    runs: int | None = None
+    hits: int | None = None
+    rbi: int | None = None
+    doubles: int | None = None
+    triples: int | None = None
+    homers: int | None = None
+
+    walks: int | None = None
+    strikeouts: int | None = None
+    hbp: int | None = None
+    roe: int | None = None
+    fielder_choice: int | None = None
+    lob: int | None = None
+    obp: float | None = None
+    slg: float | None = None
+    ops: float | None = None
+
+    stolen_bases: int | None = None
+    stolen_base_attempts: int | None = None
+
+
+@dataclass(slots=True)
 class MaxPrepsPitchingRow:
     number: str
     name: str
@@ -55,6 +86,7 @@ class MaxPrepsOpponentReport:
     team_oba: float | None = None
     team_obp_allowed: float | None = None
 
+    batters: list[MaxPrepsBattingRow] = field(default_factory=list)
     pitchers: list[MaxPrepsPitchingRow] = field(default_factory=list)
     raw_text: str = ""
 
@@ -83,6 +115,7 @@ def parse_maxpreps_pdf(pdf_path: str | Path) -> MaxPrepsOpponentReport:
     report.season = _extract_season(text)
     report.overall_record = _extract_overall_record(text)
 
+    _parse_batting_rows(text, report)
     _parse_fielding_totals(text, report)
     _parse_pitching_totals(text, report)
     _parse_pitching_rows(text, report)
@@ -107,6 +140,49 @@ def report_to_dict(report: MaxPrepsOpponentReport) -> dict[str, Any]:
         "team_obp_allowed": report.team_obp_allowed,
         "parser_warnings": list(getattr(report, "parser_warnings", []) or []),
         "parser_stats": dict(getattr(report, "parser_stats", {}) or {}),
+        "batters": [
+            {
+                "number": row.number,
+                "name": row.name,
+                "grade": row.grade,
+                "GP": row.games_played,
+                "Avg": row.avg,
+                "PA": row.plate_appearances,
+                "AB": row.at_bats,
+                "R": row.runs,
+                "H": row.hits,
+                "RBI": row.rbi,
+                "2B": row.doubles,
+                "3B": row.triples,
+                "HR": row.homers,
+                "BB": row.walks,
+                "K": row.strikeouts,
+                "HBP": row.hbp,
+                "ROE": row.roe,
+                "FC": row.fielder_choice,
+                "LOB": row.lob,
+                "OBP": row.obp,
+                "SLG": row.slg,
+                "OPS": row.ops,
+                "SB": row.stolen_bases,
+                "SBA": row.stolen_base_attempts,
+                "games_played": row.games_played,
+                "avg": row.avg,
+                "plate_appearances": row.plate_appearances,
+                "at_bats": row.at_bats,
+                "runs": row.runs,
+                "hits": row.hits,
+                "rbi": row.rbi,
+                "doubles": row.doubles,
+                "triples": row.triples,
+                "homers": row.homers,
+                "walks": row.walks,
+                "strikeouts": row.strikeouts,
+                "stolen_bases": row.stolen_bases,
+                "stolen_base_attempts": row.stolen_base_attempts,
+            }
+            for row in report.batters
+        ],
         "pitchers": [
             {
                 "number": row.number,
@@ -235,7 +311,7 @@ def _line_looks_like_name(value: str) -> bool:
     return _NAME_LINE_RE.match(str(value).strip()) is not None
 
 
-def _line_starts_pitcher_row(lines: list[str], idx: int) -> bool:
+def _line_starts_player_row(lines: list[str], idx: int) -> bool:
     if idx >= len(lines):
         return False
 
@@ -251,6 +327,10 @@ def _line_starts_pitcher_row(lines: list[str], idx: int) -> bool:
     )
 
 
+def _line_starts_pitcher_row(lines: list[str], idx: int) -> bool:
+    return _line_starts_player_row(lines, idx)
+
+
 def _parse_name_and_grade(value: str) -> tuple[str, str | None]:
     cleaned = " ".join(str(value).strip().split())
     match = re.match(
@@ -261,6 +341,369 @@ def _parse_name_and_grade(value: str) -> tuple[str, str | None]:
         return cleaned, None
 
     return " ".join(match.group("name").split()), match.group("grade")
+
+
+def _parse_batting_rows(text: str, report: MaxPrepsOpponentReport) -> None:
+    """
+    Parse MaxPreps batting and baserunning rows defensively.
+
+    MaxPreps batting is emitted as multiple table-cell streams:
+    - GP/Avg/PA/AB/R/H/RBI/2B/3B/HR
+    - BB/K/HBP/ROE/FC/LOB/OBP/SLG/OPS
+    - SB/SBA in the Baserunning section
+
+    Rows are merged by jersey number + normalized name.
+    """
+    batting_section = _section_between(text, "Batting", "Baserunning")
+    baserunning_section = _section_between(text, "Baserunning", "Fielding")
+
+    merged: dict[str, MaxPrepsBattingRow] = {}
+    fragments_seen = 0
+    baserunning_rows_merged = 0
+    row_shape_counts: dict[str, int] = {}
+
+    if batting_section:
+        lines = [line.strip() for line in batting_section.splitlines() if line.strip()]
+        active_table: str | None = None
+        idx = 0
+
+        while idx < len(lines):
+            line = lines[idx]
+
+            if line == "#" and idx + 1 < len(lines) and lines[idx + 1] == "Athlete Name":
+                header: list[str] = []
+                idx += 2
+
+                while (
+                    idx < len(lines)
+                    and not _line_starts_player_row(lines, idx)
+                    and lines[idx] not in {"#", "Season Totals"}
+                ):
+                    header.append(lines[idx])
+                    idx += 1
+
+                header_set = set(header)
+
+                if "Avg" in header_set and "PA" in header_set and "AB" in header_set:
+                    active_table = "batting_summary"
+                elif "OBP" in header_set and "SLG" in header_set and "OPS" in header_set:
+                    active_table = "batting_rates"
+                else:
+                    active_table = None
+
+                continue
+
+            if line == "Season Totals":
+                idx += 1
+                while idx < len(lines) and lines[idx] != "#":
+                    idx += 1
+                continue
+
+            if active_table and _line_starts_player_row(lines, idx):
+                row, idx = _read_player_stat_fragment(lines, idx)
+                if row is None:
+                    continue
+
+                number, name, grade, stat_tokens = row
+
+                if not stat_tokens:
+                    continue
+
+                fragments_seen += 1
+                row_shape_counts[active_table] = row_shape_counts.get(active_table, 0) + 1
+
+                batter = _get_or_create_batter(merged, number, name, grade)
+
+                if active_table == "batting_summary":
+                    _merge_batting_summary_tokens(batter, stat_tokens)
+                elif active_table == "batting_rates":
+                    _merge_batting_rates_tokens(batter, stat_tokens)
+
+                continue
+
+            idx += 1
+    else:
+        report.parser_warnings.append("No Batting section found in MaxPreps PDF.")
+
+    if baserunning_section:
+        lines = [line.strip() for line in baserunning_section.splitlines() if line.strip()]
+        active_table = False
+        idx = 0
+
+        while idx < len(lines):
+            line = lines[idx]
+
+            if line == "#" and idx + 1 < len(lines) and lines[idx + 1] == "Athlete Name":
+                header: list[str] = []
+                idx += 2
+
+                while (
+                    idx < len(lines)
+                    and not _line_starts_player_row(lines, idx)
+                    and lines[idx] not in {"#", "Season Totals"}
+                ):
+                    header.append(lines[idx])
+                    idx += 1
+
+                header_set = set(header)
+                active_table = "SB" in header_set and "SBA" in header_set
+                continue
+
+            if line == "Season Totals":
+                idx += 1
+                while idx < len(lines) and lines[idx] != "#":
+                    idx += 1
+                continue
+
+            if active_table and _line_starts_player_row(lines, idx):
+                row, idx = _read_player_stat_fragment(lines, idx)
+                if row is None:
+                    continue
+
+                number, name, grade, stat_tokens = row
+                if not stat_tokens:
+                    continue
+
+                batter = _get_or_create_batter(merged, number, name, grade)
+                _merge_baserunning_tokens(batter, stat_tokens)
+                baserunning_rows_merged += 1
+                row_shape_counts["baserunning"] = row_shape_counts.get("baserunning", 0) + 1
+                continue
+
+            idx += 1
+
+    batters = []
+    skipped_zero_rows = 0
+
+    for row in merged.values():
+        if _is_zero_batting_row(row):
+            skipped_zero_rows += 1
+            continue
+        if _has_batting_evidence(row):
+            batters.append(row)
+
+    batters.sort(
+        key=lambda r: (
+            -(r.plate_appearances or 0),
+            -(r.at_bats or 0),
+            -(r.hits or 0),
+            r.name,
+        )
+    )
+
+    report.batters = batters
+
+    if batting_section and not batters:
+        report.parser_warnings.append(
+            "No usable batting rows were found. The PDF may use a MaxPreps batting layout this parser does not recognize yet."
+        )
+
+    report.parser_stats.update(
+        {
+            "batting_row_fragments_seen": fragments_seen,
+            "batting_rows_merged": len(merged),
+            "batters_loaded": len(batters),
+            "baserunning_rows_merged": baserunning_rows_merged,
+            "batting_row_shape_counts": row_shape_counts,
+            "skipped_zero_batting_rows": skipped_zero_rows,
+        }
+    )
+
+
+def _read_player_stat_fragment(
+    lines: list[str],
+    idx: int,
+) -> tuple[tuple[str, str, str | None, list[str]] | None, int]:
+    number = ""
+
+    if lines[idx] == "N. Player":
+        raw_name = "N. Player"
+        idx += 1
+    else:
+        number = lines[idx]
+        raw_name = lines[idx + 1]
+        idx += 2
+
+    raw_name = " ".join(raw_name.strip().split())
+    if raw_name.lower() == "n. player":
+        while (
+            idx < len(lines)
+            and lines[idx] != "#"
+            and lines[idx] != "Season Totals"
+            and not _line_starts_player_row(lines, idx)
+        ):
+            idx += 1
+
+        return None, idx
+
+    name, grade = _parse_name_and_grade(raw_name)
+
+    stat_tokens: list[str] = []
+    while (
+        idx < len(lines)
+        and lines[idx] != "#"
+        and lines[idx] != "Season Totals"
+        and not _line_starts_player_row(lines, idx)
+    ):
+        if re.fullmatch(r"[0-9.]+", lines[idx]):
+            stat_tokens.append(lines[idx])
+        idx += 1
+
+    return (number, name, grade, stat_tokens), idx
+
+
+def _get_or_create_batter(
+    merged: dict[str, MaxPrepsBattingRow],
+    number: str,
+    name: str,
+    grade: str | None,
+) -> MaxPrepsBattingRow:
+    key = _pitcher_key(number, name)
+    row = merged.get(key)
+
+    if row is None:
+        row = MaxPrepsBattingRow(
+            number=number,
+            name=name,
+            grade=grade,
+        )
+        merged[key] = row
+    elif not row.grade and grade:
+        row.grade = grade
+
+    return row
+
+
+def _merge_batting_summary_tokens(row: MaxPrepsBattingRow, tokens: list[str]) -> None:
+    """
+    Merge GP/Avg/PA/AB/R/H/RBI/2B/3B/HR from the first batting table.
+
+    This favors the common complete row shape but remains permissive when
+    PDF extraction drops trailing zero cells.
+    """
+    if len(tokens) < 6:
+        return
+
+    row.games_played = _safe_int(tokens[0]) if row.games_played is None else row.games_played
+    row.avg = _parse_decimal(tokens[1]) if row.avg is None else row.avg
+    row.plate_appearances = _safe_int(tokens[2]) if row.plate_appearances is None else row.plate_appearances
+    row.at_bats = _safe_int(tokens[3]) if row.at_bats is None else row.at_bats
+    row.runs = _safe_int(tokens[4]) if row.runs is None else row.runs
+    row.hits = _safe_int(tokens[5]) if row.hits is None else row.hits
+
+    if len(tokens) >= 7:
+        row.rbi = _safe_int(tokens[6]) if row.rbi is None else row.rbi
+    if len(tokens) >= 8:
+        row.doubles = _safe_int(tokens[7]) if row.doubles is None else row.doubles
+    if len(tokens) >= 9:
+        row.triples = _safe_int(tokens[8]) if row.triples is None else row.triples
+    if len(tokens) >= 10:
+        row.homers = _safe_int(tokens[9]) if row.homers is None else row.homers
+
+
+def _merge_batting_rates_tokens(row: MaxPrepsBattingRow, tokens: list[str]) -> None:
+    """
+    Merge BB/K/HBP/ROE/FC/LOB/OBP/SLG/OPS from the second batting table.
+
+    Header is:
+      GP SF SH/B BB K HBP ROE FC LOB OBP SLG OPS
+
+    MaxPreps/PyMuPDF can omit zero-value cells, so OBP/SLG/OPS are anchored
+    from the final three decimal/rate-looking tokens instead of fixed indexes.
+    """
+    if len(tokens) < 4:
+        return
+
+    rate_indexes = [
+        idx
+        for idx, token in enumerate(tokens)
+        if _looks_like_batting_rate_token(token)
+    ]
+
+    rate_tokens: list[str] = []
+    rate_tail_start_idx: int | None = None
+
+    if len(rate_indexes) >= 3:
+        final_rate_indexes = rate_indexes[-3:]
+        rate_tail_start_idx = final_rate_indexes[0]
+        rate_tokens = [tokens[idx] for idx in final_rate_indexes]
+    elif len(tokens) >= 3 and all(_looks_like_rate(tok) for tok in tokens[-3:]):
+        rate_tail_start_idx = len(tokens) - 3
+        rate_tokens = tokens[-3:]
+
+    int_prefix_source = tokens[:rate_tail_start_idx] if rate_tail_start_idx is not None else tokens
+    int_prefix = [
+        _safe_int(token)
+        for token in int_prefix_source
+        if re.fullmatch(r"\d+", str(token).strip())
+    ]
+    int_prefix = [value for value in int_prefix if value is not None]
+
+    if int_prefix:
+        row.games_played = int_prefix[0] if row.games_played is None else row.games_played
+
+    stat_ints = int_prefix[1:] if int_prefix else []
+
+    # The matchup model relies most on BB/K/HBP/ROE. MaxPreps emits this table as:
+    #   GP SF SH/B BB K HBP ROE FC LOB OBP SLG OPS
+    # but PyMuPDF inconsistently keeps or drops zero SF/SH/B/FC/LOB cells. Infer
+    # the core offensive counts before filling less-important FC/LOB.
+    core_stat_ints = stat_ints
+
+    if len(stat_ints) >= 6 and stat_ints[0] <= 2 and stat_ints[1] <= 2:
+        core_stat_ints = stat_ints[2:]
+    elif len(stat_ints) >= 5 and stat_ints[0] <= 2:
+        core_stat_ints = stat_ints[1:]
+
+    if len(core_stat_ints) >= 1:
+        row.walks = core_stat_ints[0] if row.walks is None else row.walks
+    if len(core_stat_ints) >= 2:
+        row.strikeouts = core_stat_ints[1] if row.strikeouts is None else row.strikeouts
+    if len(core_stat_ints) >= 3:
+        row.hbp = core_stat_ints[2] if row.hbp is None else row.hbp
+    if len(core_stat_ints) >= 4:
+        row.roe = core_stat_ints[3] if row.roe is None else row.roe
+    if len(core_stat_ints) >= 5:
+        row.fielder_choice = core_stat_ints[4] if row.fielder_choice is None else row.fielder_choice
+    if len(core_stat_ints) >= 6:
+        row.lob = core_stat_ints[5] if row.lob is None else row.lob
+
+    if rate_tokens:
+        row.obp = _parse_decimal(rate_tokens[0]) if row.obp is None else row.obp
+        row.slg = _parse_decimal(rate_tokens[1]) if row.slg is None else row.slg
+        row.ops = _parse_decimal(rate_tokens[2]) if row.ops is None else row.ops
+
+
+def _merge_baserunning_tokens(row: MaxPrepsBattingRow, tokens: list[str]) -> None:
+    """
+    Merge GP/SB/SBA from the baserunning table.
+    """
+    if len(tokens) < 3:
+        return
+
+    row.games_played = _safe_int(tokens[0]) if row.games_played is None else row.games_played
+    row.stolen_bases = _safe_int(tokens[1]) if row.stolen_bases is None else row.stolen_bases
+    row.stolen_base_attempts = _safe_int(tokens[2]) if row.stolen_base_attempts is None else row.stolen_base_attempts
+
+
+def _has_batting_evidence(row: MaxPrepsBattingRow) -> bool:
+    return (
+        int(row.plate_appearances or 0) > 0
+        or int(row.at_bats or 0) > 0
+        or int(row.hits or 0) > 0
+        or int(row.walks or 0) > 0
+        or int(row.strikeouts or 0) > 0
+        or int(row.hbp or 0) > 0
+        or float(row.obp or 0.0) > 0.0
+        or float(row.slg or 0.0) > 0.0
+        or float(row.ops or 0.0) > 0.0
+        or int(row.stolen_bases or 0) > 0
+        or int(row.stolen_base_attempts or 0) > 0
+    )
+
+
+def _is_zero_batting_row(row: MaxPrepsBattingRow) -> bool:
+    return not _has_batting_evidence(row)
 
 
 def _parse_pitching_rows(text: str, report: MaxPrepsOpponentReport) -> None:
@@ -286,14 +729,16 @@ def _parse_pitching_rows(text: str, report: MaxPrepsOpponentReport) -> None:
     if not pitching_section:
         report.pitchers = []
         report.parser_warnings.append("No Pitching section found in MaxPreps PDF.")
-        report.parser_stats = {
-            "pitching_row_fragments_seen": 0,
-            "pitching_rows_merged": 0,
-            "pitchers_loaded": 0,
-            "skipped_zero_rows": 0,
-            "skipped_placeholder_rows": 0,
-            "row_shape_counts": {},
-        }
+        report.parser_stats.update(
+            {
+                "pitching_row_fragments_seen": 0,
+                "pitching_rows_merged": 0,
+                "pitchers_loaded": 0,
+                "skipped_zero_rows": 0,
+                "skipped_placeholder_rows": 0,
+                "row_shape_counts": {},
+            }
+        )
         return
 
     lines = [line.strip() for line in pitching_section.splitlines() if line.strip()]
@@ -452,14 +897,16 @@ def _parse_pitching_rows(text: str, report: MaxPrepsOpponentReport) -> None:
             "No IP/H/R/ER/BB/K pitching table was detected. Pitcher profiles may be incomplete."
         )
 
-    report.parser_stats = {
-        "pitching_row_fragments_seen": fragments_seen,
-        "pitching_rows_merged": len(merged),
-        "pitchers_loaded": len(pitchers),
-        "skipped_zero_rows": skipped_zero_rows,
-        "skipped_placeholder_rows": skipped_placeholder_rows,
-        "row_shape_counts": row_shape_counts,
-    }
+    report.parser_stats.update(
+        {
+            "pitching_row_fragments_seen": fragments_seen,
+            "pitching_rows_merged": len(merged),
+            "pitchers_loaded": len(pitchers),
+            "skipped_zero_rows": skipped_zero_rows,
+            "skipped_placeholder_rows": skipped_placeholder_rows,
+            "row_shape_counts": row_shape_counts,
+        }
+    )
 
 
 def _classify_pitching_stat_tokens(tokens: list[str]) -> str:
@@ -637,6 +1084,31 @@ def _is_zero_pitching_row(row: MaxPrepsPitchingRow) -> bool:
     )
 
 
+def _looks_like_batting_rate_token(value: str) -> bool:
+    """
+    Return True for batting AVG/OBP/SLG/OPS-style tokens.
+
+    OPS and SLG can exceed 1.000, so this intentionally accepts decimal
+    numeric tokens above 1.0. It also accepts compact MaxPreps-style rate
+    tokens such as 725 or 1035.
+    """
+    cleaned = str(value).strip()
+    if not cleaned:
+        return False
+
+    if cleaned.startswith("."):
+        return True
+
+    if "." in cleaned:
+        try:
+            parsed = float(cleaned)
+        except ValueError:
+            return False
+        return 0.0 <= parsed <= 5.0
+
+    return cleaned.isdigit() and len(cleaned) in {3, 4}
+
+
 def _looks_like_rate(value: str) -> bool:
     cleaned = str(value).strip()
     if cleaned.startswith("."):
@@ -675,6 +1147,8 @@ def _parse_decimal(value: str) -> float | None:
         cleaned = "0" + cleaned
     elif len(cleaned) == 3 and cleaned.isdigit():
         cleaned = "0." + cleaned
+    elif len(cleaned) == 4 and cleaned.isdigit():
+        cleaned = f"{cleaned[0]}.{cleaned[1:]}"
     return _safe_float(cleaned)
 
 
