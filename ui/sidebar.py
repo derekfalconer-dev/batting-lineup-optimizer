@@ -131,6 +131,66 @@ def _has_present_diagnostic_value(value: object) -> bool:
     return value not in (None, "", "—")
 
 
+def _imported_pitcher_model_read(pitcher: dict) -> str:
+    kx = float(pitcher.get("strikeout_multiplier", 1.0) or 1.0)
+    bbx = float(pitcher.get("walk_multiplier", 1.0) or 1.0)
+    cx = float(pitcher.get("contact_multiplier", 1.0) or 1.0)
+    px = float(pitcher.get("power_multiplier", 1.0) or 1.0)
+
+    k_rate = float(pitcher.get("k_rate", 0.0) or 0.0)
+    bb_rate = float(pitcher.get("bb_rate", 0.0) or 0.0)
+
+    read_parts = []
+
+    if kx >= 1.15 or k_rate >= 0.24:
+        read_parts.append("creates more swing-and-miss than average")
+    elif kx <= 0.90 or k_rate <= 0.12:
+        read_parts.append("allows more balls in play than average")
+
+    if bbx <= 0.90 or bb_rate <= 0.07:
+        read_parts.append("limits free passes")
+    elif bbx >= 1.15 or bb_rate >= 0.13:
+        read_parts.append("can give away baserunners")
+
+    if cx <= 0.92:
+        read_parts.append("puts extra pressure on contact quality")
+    elif cx >= 1.08:
+        read_parts.append("is more hittable on contact")
+
+    if px >= 1.10:
+        read_parts.append("allows more damage when hitters connect")
+    elif px <= 0.92:
+        read_parts.append("mutes power impact")
+
+    if read_parts:
+        pitcher_read = "Imported MaxPreps data suggests this pitcher " + ", ".join(read_parts) + "."
+    else:
+        pitcher_read = "Imported MaxPreps data suggests this pitcher is close to a balanced profile."
+
+    coaching_read = (
+        "The optimizer will slightly reward contact stability, avoid stacking too many high-K bats, "
+        "and value hitters who can extend innings."
+    )
+
+    if bbx >= 1.15 or bb_rate >= 0.13:
+        coaching_read = (
+            "The optimizer will value patient hitters who can force deep counts and turn wildness "
+            "into traffic."
+        )
+    elif cx >= 1.08 or px >= 1.10:
+        coaching_read = (
+            "The optimizer may give more credit to damage bats because this profile allows more "
+            "productive contact."
+        )
+    elif kx <= 0.90 or k_rate <= 0.12:
+        coaching_read = (
+            "The optimizer can lean more normally on the full lineup because this profile creates "
+            "less strikeout pressure."
+        )
+
+    return f"{pitcher_read} {coaching_read}"
+
+
 def render_opponent_scouting_panel() -> str:
     st.sidebar.markdown("## 🧢 Opponent Scouting")
     st.sidebar.caption(
@@ -562,7 +622,76 @@ def render_opponent_scouting_panel() -> str:
         str(defense_level).title()
     )
 
-    with st.sidebar.expander("Add or change opponent report", expanded=False):
+    pitching_rows_parsed = (
+        parser_stats.get("pitching_rows_parsed")
+        or parser_stats.get("pitching_rows")
+        or parser_stats.get("pitching_rows_seen")
+    )
+    pitching_rows_skipped = (
+        parser_stats.get("pitching_rows_skipped")
+        or parser_stats.get("skipped_pitching_rows")
+        or parser_stats.get("pitching_rows_ignored")
+    )
+    parser_status = "Imported with parser notes" if parser_warnings else (
+        "Imported successfully" if parser_stats or pitchers else None
+    )
+
+    diagnostic_rows = []
+    if pitchers:
+        diagnostic_rows.append(f"- Pitchers loaded: **{len(pitchers)}**")
+    if _has_present_diagnostic_value(pitching_rows_parsed):
+        diagnostic_rows.append(f"- Pitching rows parsed: **{pitching_rows_parsed}**")
+    if _has_present_diagnostic_value(pitching_rows_skipped):
+        diagnostic_rows.append(f"- Pitching rows skipped: **{pitching_rows_skipped}**")
+    if _has_present_diagnostic_value(parser_status):
+        diagnostic_rows.append(f"- Source/parser status: **{parser_status}**")
+
+    with st.sidebar.expander("Scouting details", expanded=False):
+        st.markdown("**Model impact**")
+
+        st.markdown(
+            f"""
+            <div style="
+                border: 1px solid rgba(128,128,128,.22);
+                border-radius: .6rem;
+                padding: .55rem .65rem;
+                margin: .35rem 0 .65rem 0;
+                background: rgba(128,128,128,.045);
+            ">
+                <div style="font-size:.72rem; opacity:.68; font-weight:700;">
+                    {selected_pitcher.get('label', 'Pitcher profile')}
+                </div>
+                <div style="font-size:.82rem; margin-top:.25rem;">
+                    K% <b>{k_rate_text}</b> &nbsp; BB% <b>{bb_rate_text}</b> &nbsp; Sample <b>{sample_text}</b>
+                </div>
+                <div style="font-size:.82rem; line-height:1.35; margin-top:.45rem;">
+                    Strikeouts: <b>x{float(selected_pitcher.get('strikeout_multiplier', 1.0) or 1.0):.2f}</b><br>
+                    Walks: <b>x{float(selected_pitcher.get('walk_multiplier', 1.0) or 1.0):.2f}</b><br>
+                    Contact: <b>x{float(selected_pitcher.get('contact_multiplier', 1.0) or 1.0):.2f}</b><br>
+                    Power: <b>x{float(selected_pitcher.get('power_multiplier', 1.0) or 1.0):.2f}</b>
+                </div>
+                <div style="font-size:.72rem; opacity:.68; font-weight:700; margin-top:.55rem;">
+                    Coach read:
+                </div>
+                <div style="font-size:.82rem; opacity:.86; line-height:1.35; margin-top:.18rem;">
+                    {_imported_pitcher_model_read(selected_pitcher)}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        if diagnostic_rows or parser_warnings:
+            st.caption("Import summary")
+            if diagnostic_rows:
+                st.markdown("\n".join(diagnostic_rows))
+
+            if parser_warnings:
+                st.caption("Parser notes:")
+                for warning in parser_warnings:
+                    st.caption(f"- {warning}")
+
+    with st.sidebar.expander("Change report", expanded=False):
         uploaded_pdf = st.file_uploader(
             "MaxPreps PDF",
             type=["pdf"],
@@ -608,7 +737,7 @@ def render_opponent_scouting_panel() -> str:
                 except Exception as exc:
                     st.error(f"Could not import opponent report: {exc}")
 
-    with st.sidebar.expander("Manage saved opponent report", expanded=False):
+    with st.sidebar.expander("Manage reports", expanded=False):
         st.caption(
             "Deleting removes this scouting report from the current team. "
             "This cannot be undone."
@@ -634,41 +763,6 @@ def render_opponent_scouting_panel() -> str:
                 st.rerun()
             except Exception as exc:
                 st.error(f"Could not delete opponent report: {exc}")
-
-    pitching_rows_parsed = (
-        parser_stats.get("pitching_rows_parsed")
-        or parser_stats.get("pitching_rows")
-        or parser_stats.get("pitching_rows_seen")
-    )
-    pitching_rows_skipped = (
-        parser_stats.get("pitching_rows_skipped")
-        or parser_stats.get("skipped_pitching_rows")
-        or parser_stats.get("pitching_rows_ignored")
-    )
-    parser_status = "Imported with parser notes" if parser_warnings else (
-        "Imported successfully" if parser_stats or pitchers else None
-    )
-
-    diagnostic_rows = []
-    if pitchers:
-        diagnostic_rows.append(f"- Pitchers loaded: **{len(pitchers)}**")
-    if _has_present_diagnostic_value(pitching_rows_parsed):
-        diagnostic_rows.append(f"- Pitching rows parsed: **{pitching_rows_parsed}**")
-    if _has_present_diagnostic_value(pitching_rows_skipped):
-        diagnostic_rows.append(f"- Pitching rows skipped: **{pitching_rows_skipped}**")
-    if _has_present_diagnostic_value(parser_status):
-        diagnostic_rows.append(f"- Source/parser status: **{parser_status}**")
-
-    if diagnostic_rows or parser_warnings:
-        with st.sidebar.expander("Advanced opponent scouting details", expanded=False):
-            st.caption("Opponent report import summary.")
-            if diagnostic_rows:
-                st.markdown("\n".join(diagnostic_rows))
-
-            if parser_warnings:
-                st.caption("Parser notes:")
-                for warning in parser_warnings:
-                    st.caption(f"- {warning}")
 
     return opponent_level_label
 
