@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 
 def _safe_div(numerator: float, denominator: float, default: float = 0.0) -> float:
@@ -39,6 +40,147 @@ def _inverse_rate_score(value: float, *, excellent: float, poor: float) -> float
 
 def _format_pct(value: float) -> str:
     return f"{value:.1%}"
+
+
+def _is_blank_value(value: Any) -> bool:
+    return value is None or str(value).strip() in {"", "-"}
+
+
+def _normalized_key(value: str) -> str:
+    return "".join(ch for ch in str(value).lower() if ch.isalnum())
+
+
+def _as_float(value, default=0.0) -> float:
+    if _is_blank_value(value):
+        return default
+
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    cleaned = str(value).strip().replace(",", "")
+    is_percent = cleaned.endswith("%")
+    if is_percent:
+        cleaned = cleaned[:-1].strip()
+
+    if cleaned.startswith("."):
+        cleaned = "0" + cleaned
+
+    try:
+        parsed = float(cleaned)
+    except (TypeError, ValueError):
+        return default
+
+    if is_percent:
+        return parsed / 100.0
+
+    return parsed
+
+
+def _as_int(value, default=0) -> int:
+    if _is_blank_value(value):
+        return default
+
+    try:
+        return int(round(_as_float(value, float(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _first_present(row: dict, keys: list[str], default=None):
+    if row is None:
+        return default
+
+    for key in keys:
+        if isinstance(row, dict) and key in row and not _is_blank_value(row[key]):
+            return row[key]
+
+        if not isinstance(row, dict) and hasattr(row, key):
+            value = getattr(row, key)
+            if not _is_blank_value(value):
+                return value
+
+    if isinstance(row, dict):
+        normalized_lookup = {
+            _normalized_key(str(existing_key)): value
+            for existing_key, value in row.items()
+        }
+
+        for key in keys:
+            value = normalized_lookup.get(_normalized_key(key))
+            if not _is_blank_value(value):
+                return value
+
+    return default
+
+
+def _parse_baseball_ip(value) -> float:
+    if _is_blank_value(value):
+        return 0.0
+
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    cleaned = str(value).strip().replace(",", "")
+    if "." not in cleaned:
+        return _as_float(cleaned, 0.0)
+
+    whole, frac = cleaned.split(".", 1)
+    whole_int = _as_int(whole, 0)
+
+    if frac == "1":
+        return whole_int + (1.0 / 3.0)
+    if frac == "2":
+        return whole_int + (2.0 / 3.0)
+
+    return _as_float(cleaned, 0.0)
+
+
+def _as_rate(value, default: float = 0.0) -> float:
+    if _is_blank_value(value):
+        return default
+
+    if isinstance(value, str):
+        cleaned = value.strip().replace(",", "")
+        if cleaned.endswith("%"):
+            return _as_float(cleaned, default)
+
+        if cleaned.startswith("."):
+            return _as_float(cleaned, default)
+
+        if cleaned.isdigit() and len(cleaned) in {3, 4}:
+            return float(cleaned) / 1000.0
+
+        parsed = _as_float(cleaned, default)
+        if parsed > 2.0 and parsed <= 100.0:
+            return parsed / 100.0
+        return parsed
+
+    return _as_float(value, default)
+
+
+def _optional_float(value) -> float | None:
+    if _is_blank_value(value):
+        return None
+    return _as_float(value, 0.0)
+
+
+def _is_totals_name(name: str) -> bool:
+    normalized = " ".join(str(name).strip().lower().split())
+    return normalized in {
+        "season totals",
+        "totals",
+        "team totals",
+        "overall totals",
+    }
+
+
+def _first_name(row: dict) -> str:
+    value = _first_present(
+        row,
+        ["name", "athlete", "athlete_name", "player", "Athlete Name"],
+        default="",
+    )
+    return " ".join(str(value).strip().split())
 
 
 @dataclass(slots=True)
@@ -299,6 +441,149 @@ def _two_hole_table_setter_score(hitter: OpponentHitterProfile) -> float:
         + (0.18 * _inverse_rate_score(hitter.k_rate, excellent=0.050, poor=0.300))
         + (0.10 * hitter.sample_size_score)
     )
+
+
+def build_opponent_hitters_from_rows(rows: list[dict]) -> list[OpponentHitterProfile]:
+    hitters: list[OpponentHitterProfile] = []
+
+    for row in rows or []:
+        name = _first_name(row)
+        if not name or _is_totals_name(name) or name.lower() == "n. player":
+            continue
+
+        gp = _as_int(_first_present(row, ["GP", "gp", "games_played"], 0))
+        pa = _as_int(_first_present(row, ["PA", "pa", "plate_appearances"], 0))
+        ab = _as_int(_first_present(row, ["AB", "ab", "at_bats"], 0))
+        hits = _as_int(_first_present(row, ["H", "h", "hits"], 0))
+        doubles = _as_int(_first_present(row, ["2B", "doubles"], 0))
+        triples = _as_int(_first_present(row, ["3B", "triples"], 0))
+        hr = _as_int(_first_present(row, ["HR", "hr", "home_runs", "homers"], 0))
+        bb = _as_int(_first_present(row, ["BB", "bb", "walks"], 0))
+        k = _as_int(_first_present(row, ["K", "k", "SO", "so", "strikeouts"], 0))
+        hbp = _as_int(_first_present(row, ["HBP", "hbp", "hit_by_pitch"], 0))
+        sb = _as_int(_first_present(row, ["SB", "sb", "stolen_bases"], 0))
+
+        obp_raw = _first_present(row, ["OBP", "obp", "on_base_percentage"])
+        slg_raw = _first_present(row, ["SLG", "slg", "slugging_percentage"])
+        ops_raw = _first_present(row, ["OPS", "ops"])
+
+        obp = (
+            _as_rate(obp_raw)
+            if obp_raw is not None
+            else _safe_div(hits + bb + hbp, pa)
+        )
+
+        total_bases = hits + doubles + (2 * triples) + (3 * hr)
+        slg = (
+            _as_rate(slg_raw)
+            if slg_raw is not None
+            else _safe_div(total_bases, ab)
+        )
+
+        ops = _as_rate(ops_raw) if ops_raw is not None else obp + slg
+
+        if not any([pa, ab, hits, doubles, triples, hr, bb, k, hbp, sb, obp, slg, ops]):
+            continue
+
+        hitters.append(
+            OpponentHitterProfile(
+                name=name,
+                pa=pa,
+                ab=ab,
+                hits=hits,
+                doubles=doubles,
+                triples=triples,
+                hr=hr,
+                bb=bb,
+                k=k,
+                hbp=hbp,
+                obp=obp,
+                slg=slg,
+                ops=ops,
+                sb=sb,
+                gp=gp,
+            )
+        )
+
+    return hitters
+
+
+def build_pitchers_from_rows(rows: list[dict]) -> list[PitcherProfile]:
+    pitchers: list[PitcherProfile] = []
+
+    for row in rows or []:
+        name = _first_name(row)
+        if not name or _is_totals_name(name) or name.lower() == "n. player":
+            continue
+
+        ip = _parse_baseball_ip(
+            _first_present(row, ["IP", "ip", "innings_pitched", "Innings Pitched"], 0)
+        )
+        bf = _as_int(_first_present(row, ["BF", "bf", "batters_faced", "batters faced"], 0))
+        ab = _as_int(_first_present(row, ["AB", "ab", "at_bats_against", "at bats against"], 0))
+        hits_allowed = _as_int(_first_present(row, ["H", "h", "hits_allowed", "hits allowed"], 0))
+        doubles_allowed = _as_int(_first_present(row, ["2B", "doubles_allowed", "doubles allowed"], 0))
+        triples_allowed = _as_int(_first_present(row, ["3B", "triples_allowed", "triples allowed"], 0))
+        hr_allowed = _as_int(_first_present(row, ["HR", "hr", "homers_allowed", "home_runs_allowed", "homers allowed"], 0))
+        bb = _as_int(_first_present(row, ["BB", "bb", "walks"], 0))
+        k = _as_int(_first_present(row, ["K", "k", "SO", "so", "strikeouts"], 0))
+        hbp = _as_int(_first_present(row, ["HBP", "hbp", "hit_by_pitch"], 0))
+        pitches = _as_int(_first_present(row, ["#P", "Pitches", "pitches", "pitch_count"], 0))
+
+        oba = _as_rate(
+            _first_present(row, ["OBA", "oba", "opponent_ba", "opponent_batting_average"], 0)
+        )
+        obp_allowed = _as_rate(
+            _first_present(row, ["OBP", "obp", "opponent_obp", "obp_allowed"], 0)
+        )
+
+        if not any([ip, bf, pitches, hits_allowed, bb, k, hbp, oba, obp_allowed]):
+            continue
+
+        pitchers.append(
+            PitcherProfile(
+                name=name,
+                ip=ip,
+                bf=bf,
+                ab=ab,
+                hits_allowed=hits_allowed,
+                doubles_allowed=doubles_allowed,
+                triples_allowed=triples_allowed,
+                hr_allowed=hr_allowed,
+                bb=bb,
+                k=k,
+                hbp=hbp,
+                oba=oba,
+                obp_allowed=obp_allowed,
+                pitches=pitches,
+                era=_optional_float(_first_present(row, ["ERA", "era"])),
+                gp=_as_int(_first_present(row, ["GP", "gp", "APP", "app", "appearances"], 0)),
+                gs=_as_int(_first_present(row, ["GS", "gs", "games_started"], 0)),
+            )
+        )
+
+    return pitchers
+
+
+def build_pitcher_matchup_report(
+    opponent_batting_rows: list[dict],
+    own_pitching_rows: list[dict],
+    lineup_size: int = 9,
+) -> dict:
+    hitters = build_opponent_hitters_from_rows(opponent_batting_rows)
+    pitchers = build_pitchers_from_rows(own_pitching_rows)
+    projected_lineup = project_opponent_lineup(hitters, lineup_size=lineup_size)
+    lineup_summary = summarize_opponent_lineup(projected_lineup)
+    pitcher_rankings = rank_pitchers_for_opponent(pitchers, projected_lineup)
+
+    return {
+        "hitters": hitters,
+        "pitchers": pitchers,
+        "projected_lineup": projected_lineup,
+        "lineup_summary": lineup_summary,
+        "pitcher_rankings": pitcher_rankings,
+        "assumptions": get_pitcher_matchup_assumptions(),
+    }
 
 
 def project_opponent_lineup(
@@ -702,6 +987,9 @@ __all__ = [
     "PitcherProfile",
     "ProjectedLineupSpot",
     "PitcherMatchupResult",
+    "build_opponent_hitters_from_rows",
+    "build_pitchers_from_rows",
+    "build_pitcher_matchup_report",
     "project_opponent_lineup",
     "rank_pitchers_for_opponent",
     "summarize_opponent_lineup",
