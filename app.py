@@ -7,6 +7,7 @@ import altair as alt
 import pandas as pd
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 from ui.styles import inject_custom_styles
 
@@ -345,6 +346,19 @@ def complete_lineup_with_remaining_active_players(
 
 
 def render_absent_player_shock_panel(run_settings: dict) -> None:
+    st.markdown('<div id="absent-player-shock-chart"></div>', unsafe_allow_html=True)
+
+    if st.session_state.pop("scroll_to_shock_chart", False):
+        components.html(
+            """
+            <script>
+              const el = window.parent.document.getElementById("absent-player-shock-chart");
+              if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+            </script>
+            """,
+            height=0,
+        )
+
     with st.expander("Absent Player Shock Chart", expanded=True):
         st.caption(
             """
@@ -3458,6 +3472,7 @@ def render_coach_lab(
                                 st.session_state.absent_player_shock_status
                             ),
                         )
+                        st.session_state.scroll_to_shock_chart = True
 
                         st.rerun()
 
