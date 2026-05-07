@@ -268,6 +268,9 @@ def ensure_ui_state() -> None:
     if "absent_player_shock_status" not in st.session_state:
         st.session_state.absent_player_shock_status = None
 
+    if "scroll_to_active_batting_order" not in st.session_state:
+        st.session_state.scroll_to_active_batting_order = False
+
     if "coach_lab_chart_compare_items" not in st.session_state:
         st.session_state.coach_lab_chart_compare_items = []
 
@@ -508,6 +511,7 @@ def render_absent_player_shock_panel(run_settings: dict) -> None:
 
                         st.session_state.coach_lab_workspace_mode = "custom"
                         clear_lineup_order_widget_state()
+                        st.session_state.scroll_to_active_batting_order = True
 
                         st.success(
                             f"Benched {player_name} and applied the suggested batting order."
@@ -3630,6 +3634,19 @@ def render_coach_lab(
                 unsafe_allow_html=True,
             )
 
+
+        st.markdown('<div id="active-batting-order"></div>', unsafe_allow_html=True)
+
+        if st.session_state.pop("scroll_to_active_batting_order", False):
+            components.html(
+                """
+                <script>
+                  const el = window.parent.document.getElementById("active-batting-order");
+                  if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+                </script>
+                """,
+                height=0,
+            )
 
         with st.expander("Active batting order", expanded=True):
             st.caption(
