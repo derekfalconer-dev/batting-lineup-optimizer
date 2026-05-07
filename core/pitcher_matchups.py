@@ -973,6 +973,221 @@ def rank_pitchers_for_opponent(
     )
 
 
+def _get_report_value(item: Any, key: str, default: Any = None) -> Any:
+    if item is None:
+        return default
+
+    if isinstance(item, dict):
+        return item.get(key, default)
+
+    return getattr(item, key, default)
+
+
+def _format_rate_decimal(value: Any) -> str:
+    try:
+        return f"{float(value):.3f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _format_rate_percent(value: Any) -> str:
+    try:
+        return f"{float(value):.1%}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _format_report_score(value: Any) -> str:
+    try:
+        return f"{float(value):.1f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _format_ip(value: Any) -> str:
+    try:
+        return f"{float(value):.1f}"
+    except (TypeError, ValueError):
+        return "0.0"
+
+
+def _one_line(value: Any) -> str:
+    return " ".join(str(value or "").split())
+
+
+def format_pitcher_matchup_report(report: dict, max_pitchers: int = 5) -> str:
+    """
+    Format a pitching matchup report as plain coach-facing text.
+
+    This is intentionally pure Python so matchup-report copy can be reviewed
+    before adding any Streamlit UI.
+    """
+    report = report if isinstance(report, dict) else {}
+
+    try:
+        pitcher_limit = max(0, int(max_pitchers))
+    except (TypeError, ValueError):
+        pitcher_limit = 5
+
+    summary = report.get("lineup_summary") or {}
+    projected_lineup = list(report.get("projected_lineup") or [])
+    rankings = list(report.get("pitcher_rankings") or [])
+    assumptions = list(report.get("assumptions") or [])
+
+    lines: list[str] = [
+        "Pitching Matchup Report",
+        "",
+        "Opponent Lineup Summary",
+    ]
+
+    if summary:
+        strength = str(_get_report_value(summary, "lineup_strength_label", "Unknown"))
+        explanation = _one_line(_get_report_value(summary, "explanation", ""))
+
+        lines.extend(
+            [
+                f"This projected lineup profiles as a {strength}.",
+                "This is a stats-based projection, not an official batting order.",
+                (
+                    "Projected averages: "
+                    f"OBP {_format_rate_decimal(_get_report_value(summary, 'avg_obp', 0.0))}, "
+                    f"SLG {_format_rate_decimal(_get_report_value(summary, 'avg_slg', 0.0))}, "
+                    f"OPS {_format_rate_decimal(_get_report_value(summary, 'avg_ops', 0.0))}, "
+                    f"K rate {_format_rate_percent(_get_report_value(summary, 'avg_k_rate', 0.0))}, "
+                    f"BB rate {_format_rate_percent(_get_report_value(summary, 'avg_bb_rate', 0.0))}."
+                ),
+            ]
+        )
+
+        if explanation:
+            lines.append(explanation)
+    else:
+        lines.append("No opponent lineup summary is available yet.")
+
+    lines.extend(["", "Assumed Opponent Lineup"])
+
+    if projected_lineup:
+        for idx, spot in enumerate(projected_lineup, start=1):
+            hitter = _get_report_value(spot, "hitter")
+            spot_number = _get_report_value(spot, "spot", idx)
+            role = str(_get_report_value(spot, "role", "Projected hitter"))
+            explanation = _one_line(_get_report_value(spot, "explanation", ""))
+
+            lines.append(
+                f"{spot_number}. {str(_get_report_value(hitter, 'name', 'Unknown hitter'))} — {role}"
+            )
+            lines.append(
+                "   "
+                f"OBP {_format_rate_decimal(_get_report_value(hitter, 'obp', 0.0))} / "
+                f"SLG {_format_rate_decimal(_get_report_value(hitter, 'slg', 0.0))} / "
+                f"OPS {_format_rate_decimal(_get_report_value(hitter, 'ops', 0.0))} / "
+                f"K% {_format_rate_percent(_get_report_value(hitter, 'k_rate', 0.0))} / "
+                f"BB% {_format_rate_percent(_get_report_value(hitter, 'bb_rate', 0.0))}"
+            )
+            if explanation:
+                lines.append(f"   {explanation}")
+    else:
+        lines.append("No projected opponent lineup is available yet.")
+
+    lines.extend(["", "Recommended Pitcher Ranking"])
+
+    ranked_subset = rankings[:pitcher_limit] if pitcher_limit else []
+
+    if ranked_subset:
+        for idx, result in enumerate(ranked_subset, start=1):
+            pitcher = _get_report_value(result, "pitcher")
+            caveats = list(_get_report_value(result, "caveats", []) or [])
+            explanation = _one_line(_get_report_value(result, "explanation", ""))
+
+            lines.append(
+                f"{idx}. {str(_get_report_value(pitcher, 'name', 'Unknown pitcher'))} — "
+                f"{str(_get_report_value(result, 'recommended_role', 'No role recommendation'))}"
+            )
+            lines.append(
+                "   "
+                f"Matchup score {_format_report_score(_get_report_value(result, 'matchup_score', 0.0))}; "
+                f"projected runs index {_format_report_score(_get_report_value(result, 'projected_runs_index', 0.0))}; "
+                f"sample confidence {str(_get_report_value(result, 'sample_confidence', 'Unknown'))}."
+            )
+            lines.append(
+                "   "
+                f"Key line: IP {_format_ip(_get_report_value(pitcher, 'ip', 0.0))}, "
+                f"BF {int(_get_report_value(pitcher, 'bf', 0) or 0)}, "
+                f"K% {_format_rate_percent(_get_report_value(pitcher, 'k_rate', 0.0))}, "
+                f"BB% {_format_rate_percent(_get_report_value(pitcher, 'bb_rate', 0.0))}, "
+                f"free-base% {_format_rate_percent(_get_report_value(pitcher, 'free_base_rate', 0.0))}, "
+                f"OBA {_format_rate_decimal(_get_report_value(pitcher, 'oba', 0.0))}, "
+                f"OBP allowed {_format_rate_decimal(_get_report_value(pitcher, 'obp_allowed', 0.0))}, "
+                f"damage rate {_format_rate_percent(_get_report_value(pitcher, 'damage_rate', 0.0))}."
+            )
+            if explanation:
+                lines.append(f"   Read: {explanation}")
+            if caveats:
+                lines.append("   Caveats:")
+                for caveat in caveats:
+                    lines.append(f"   - {_one_line(caveat)}")
+            lines.append("")
+    else:
+        lines.append("No pitcher rankings are available yet.")
+
+    lines.extend(["Best Read / Coach Takeaway"])
+
+    if rankings:
+        top = rankings[0]
+        top_pitcher = _get_report_value(top, "pitcher")
+        top_name = str(_get_report_value(top_pitcher, "name", "Unknown pitcher"))
+        top_role = str(_get_report_value(top, "recommended_role", "No role recommendation"))
+        top_score = float(_get_report_value(top, "matchup_score", 0.0) or 0.0)
+
+        lines.append(
+            f"{top_name} is the best statistical matchup in the current data "
+            f"with a matchup score of {top_score:.1f}/100."
+        )
+
+        if top_role == "Avoid unless roster context requires it":
+            lines.append("This is the best option in the current data, not a clean matchup.")
+
+        top_group = rankings[: min(3, len(rankings))]
+        if len(top_group) >= 2:
+            group_scores = [
+                float(_get_report_value(item, "matchup_score", 0.0) or 0.0)
+                for item in top_group
+            ]
+            score_gap = max(group_scores) - min(group_scores)
+
+            if score_gap <= 5.0:
+                lines.append(
+                    f"The top {len(top_group)} options are tightly grouped; "
+                    f"only {score_gap:.1f} matchup-score points separate them."
+                )
+
+        high_variance_names = []
+        for result in rankings:
+            pitcher = _get_report_value(result, "pitcher")
+            k_rate = float(_get_report_value(pitcher, "k_rate", 0.0) or 0.0)
+            free_base_rate = float(_get_report_value(pitcher, "free_base_rate", 0.0) or 0.0)
+            if k_rate >= 0.250 and free_base_rate >= 0.130:
+                high_variance_names.append(str(_get_report_value(pitcher, "name", "Unknown pitcher")))
+
+        if high_variance_names:
+            lines.append(
+                "High-variance options: "
+                f"{', '.join(high_variance_names)} can miss bats, but the free-base rate raises volatility."
+            )
+    else:
+        lines.append("No pitcher ranking is available, so there is no matchup recommendation yet.")
+
+    lines.extend(["", "Assumptions / What Could Change This"])
+
+    if assumptions:
+        for assumption in assumptions:
+            lines.append(f"- {_one_line(assumption)}")
+    else:
+        lines.append("- No assumptions were provided with this report.")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def get_pitcher_matchup_assumptions() -> list[str]:
     return [
         "No official opponent batting order was provided.",
@@ -990,6 +1205,7 @@ __all__ = [
     "build_opponent_hitters_from_rows",
     "build_pitchers_from_rows",
     "build_pitcher_matchup_report",
+    "format_pitcher_matchup_report",
     "project_opponent_lineup",
     "rank_pitchers_for_opponent",
     "summarize_opponent_lineup",
