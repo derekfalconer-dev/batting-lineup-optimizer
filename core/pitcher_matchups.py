@@ -1004,6 +1004,23 @@ def _format_report_score(value: Any) -> str:
         return "—"
 
 
+def _run_risk_label(projected_runs_index: float) -> str:
+    try:
+        risk_index = float(projected_runs_index)
+    except (TypeError, ValueError):
+        return "Unknown"
+
+    if risk_index <= 85:
+        return "Low"
+    if risk_index <= 100:
+        return "Below average"
+    if risk_index <= 115:
+        return "Moderate"
+    if risk_index <= 130:
+        return "High"
+    return "Very high"
+
+
 def _format_ip(value: Any) -> str:
     try:
         return f"{float(value):.1f}"
@@ -1013,6 +1030,37 @@ def _format_ip(value: Any) -> str:
 
 def _one_line(value: Any) -> str:
     return " ".join(str(value or "").split())
+
+
+def _pitcher_rank_label(rank: int) -> str:
+    if rank == 1:
+        return "Top option in current data"
+    if rank in {2, 3}:
+        return "Secondary option"
+    return "Depth / emergency option"
+
+
+def _matchup_grade(result: PitcherMatchupResult) -> str:
+    pitcher = _get_report_value(result, "pitcher")
+    score = float(_get_report_value(result, "matchup_score", 0.0) or 0.0)
+    confidence = str(_get_report_value(result, "sample_confidence", "Unknown"))
+    k_rate = float(_get_report_value(pitcher, "k_rate", 0.0) or 0.0)
+    free_base_rate = float(_get_report_value(pitcher, "free_base_rate", 0.0) or 0.0)
+
+    if k_rate >= 0.200 and free_base_rate >= 0.180:
+        return "High-variance option: strikeout upside with elevated free-base risk"
+
+    if score >= 76 and confidence != "Low":
+        return "Clean statistical matchup"
+    if score >= 66:
+        return "Strong statistical option"
+    if score >= 55:
+        return "Usable matchup with caveats"
+    if score >= 40 and free_base_rate >= 0.180:
+        return "High-variance option"
+    if score >= 40:
+        return "Difficult matchup"
+    return "Difficult matchup / not a clean look"
 
 
 def format_pitcher_matchup_report(report: dict, max_pitchers: int = 5) -> str:
@@ -1047,7 +1095,7 @@ def format_pitcher_matchup_report(report: dict, max_pitchers: int = 5) -> str:
         lines.extend(
             [
                 f"This projected lineup profiles as a {strength}.",
-                "This is a stats-based projection, not an official batting order.",
+                "The opponent order below is a stats-based projection. If you have the official lineup, treat this as a starting point until lineup import is supported.",
                 (
                     "Projected averages: "
                     f"OBP {_format_rate_decimal(_get_report_value(summary, 'avg_obp', 0.0))}, "
@@ -1089,7 +1137,17 @@ def format_pitcher_matchup_report(report: dict, max_pitchers: int = 5) -> str:
     else:
         lines.append("No projected opponent lineup is available yet.")
 
-    lines.extend(["", "Recommended Pitcher Ranking"])
+    lines.extend(
+        [
+            "",
+            "Recommended Pitcher Ranking",
+            "",
+            "How to read this:",
+            "- Fit score: 0–100. Higher is better.",
+            "- Run risk: Lower is better. It summarizes expected traffic, free bases, and damage risk.",
+            "- Data confidence: How much usable stat sample supports the read. High confidence does not mean a good matchup.",
+        ]
+    )
 
     ranked_subset = rankings[:pitcher_limit] if pitcher_limit else []
 
@@ -1101,13 +1159,17 @@ def format_pitcher_matchup_report(report: dict, max_pitchers: int = 5) -> str:
 
             lines.append(
                 f"{idx}. {str(_get_report_value(pitcher, 'name', 'Unknown pitcher'))} — "
-                f"{str(_get_report_value(result, 'recommended_role', 'No role recommendation'))}"
+                f"{_pitcher_rank_label(idx)}"
+            )
+            lines.append(f"   Matchup grade: {_matchup_grade(result)}")
+            lines.append(
+                f"   Fit score: {_format_report_score(_get_report_value(result, 'matchup_score', 0.0))} / 100"
             )
             lines.append(
-                "   "
-                f"Matchup score {_format_report_score(_get_report_value(result, 'matchup_score', 0.0))}; "
-                f"projected runs index {_format_report_score(_get_report_value(result, 'projected_runs_index', 0.0))}; "
-                f"sample confidence {str(_get_report_value(result, 'sample_confidence', 'Unknown'))}."
+                f"   Run risk: {_run_risk_label(float(_get_report_value(result, 'projected_runs_index', 100.0) or 100.0))}"
+            )
+            lines.append(
+                f"   Data confidence: {str(_get_report_value(result, 'sample_confidence', 'Unknown'))}"
             )
             lines.append(
                 "   "
@@ -1136,7 +1198,6 @@ def format_pitcher_matchup_report(report: dict, max_pitchers: int = 5) -> str:
         top = rankings[0]
         top_pitcher = _get_report_value(top, "pitcher")
         top_name = str(_get_report_value(top_pitcher, "name", "Unknown pitcher"))
-        top_role = str(_get_report_value(top, "recommended_role", "No role recommendation"))
         top_score = float(_get_report_value(top, "matchup_score", 0.0) or 0.0)
 
         lines.append(
@@ -1144,8 +1205,10 @@ def format_pitcher_matchup_report(report: dict, max_pitchers: int = 5) -> str:
             f"with a matchup score of {top_score:.1f}/100."
         )
 
-        if top_role == "Avoid unless roster context requires it":
+        if top_score < 55:
             lines.append("This is the best option in the current data, not a clean matchup.")
+        else:
+            lines.append("This grades as a usable matchup, subject to coach scouting and availability.")
 
         top_group = rankings[: min(3, len(rankings))]
         if len(top_group) >= 2:
@@ -1161,18 +1224,19 @@ def format_pitcher_matchup_report(report: dict, max_pitchers: int = 5) -> str:
                     f"only {score_gap:.1f} matchup-score points separate them."
                 )
 
-        high_variance_names = []
-        for result in rankings:
+        has_high_variance_arm = False
+        for result in rankings[:5]:
             pitcher = _get_report_value(result, "pitcher")
             k_rate = float(_get_report_value(pitcher, "k_rate", 0.0) or 0.0)
             free_base_rate = float(_get_report_value(pitcher, "free_base_rate", 0.0) or 0.0)
-            if k_rate >= 0.250 and free_base_rate >= 0.130:
-                high_variance_names.append(str(_get_report_value(pitcher, "name", "Unknown pitcher")))
+            if k_rate >= 0.200 and free_base_rate >= 0.180:
+                has_high_variance_arm = True
+                break
 
-        if high_variance_names:
+        if has_high_variance_arm:
             lines.append(
-                "High-variance options: "
-                f"{', '.join(high_variance_names)} can miss bats, but the free-base rate raises volatility."
+                "There is at least one high-variance arm in the mix: "
+                "strikeout upside, but walks/HBP can create blow-up innings."
             )
     else:
         lines.append("No pitcher ranking is available, so there is no matchup recommendation yet.")
@@ -1190,10 +1254,10 @@ def format_pitcher_matchup_report(report: dict, max_pitchers: int = 5) -> str:
 
 def get_pitcher_matchup_assumptions() -> list[str]:
     return [
-        "No official opponent batting order was provided.",
-        "The lineup is projected from season stats.",
+        "The model projects a likely opponent lineup from season stats.",
+        "Defensive context matters. If the best statistical pitching matchup is also your shortstop, catcher, or best defender, the staff choice may change.",
+        "Coach scouting, pitcher rest, handedness, pitch count limits, can change the recommendation.",
         "Recommendations are statistical matchup estimates, not guarantees.",
-        "Coach scouting, pitcher rest, handedness, pitch count limits, and defensive context can change the recommendation.",
     ]
 
 
