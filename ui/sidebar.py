@@ -111,6 +111,20 @@ def _usable_opponent_pitcher_payloads(pitchers: list[dict]) -> list[dict]:
     return usable_pitchers
 
 
+def _pending_selected_opponent_report_id_key(team_key: str) -> str:
+    return f"pending_selected_opponent_report_id_{team_key}"
+
+
+def _queue_pending_opponent_report_selection(
+    *,
+    team_key: str,
+    opponent_report_id: object,
+) -> None:
+    report_id = str(opponent_report_id or "").strip()
+    if report_id:
+        st.session_state[_pending_selected_opponent_report_id_key(team_key)] = report_id
+
+
 def render_opponent_defense_level_control(default_label: str = "Average") -> str:
     defense_options = ["Weak", "Average", "Strong"]
     if default_label not in defense_options:
@@ -350,6 +364,11 @@ def render_opponent_scouting_panel() -> str:
                         source_file_name=Path(uploaded_pdf.name).name,
                     )
 
+                    _queue_pending_opponent_report_selection(
+                        team_key=team_key,
+                        opponent_report_id=payload.get("opponent_report_id"),
+                    )
+
                     st.sidebar.success(
                         f"Imported {payload.get('team_name', 'opponent')} "
                         f"with {len(payload.get('pitchers', []) or [])} pitcher profiles."
@@ -462,11 +481,24 @@ def render_opponent_scouting_panel() -> str:
             default_report_index = idx
             break
 
+    report_select_key = f"opponent_report_select_{st.session_state.get('selected_team_id', 'no_team')}"
+    pending_report_id = st.session_state.pop(
+        _pending_selected_opponent_report_id_key(team_key),
+        None,
+    )
+
+    if pending_report_id:
+        for idx, label in enumerate(report_labels):
+            if str(report_by_label[label].get("opponent_report_id")) == str(pending_report_id):
+                default_report_index = idx
+                st.session_state[report_select_key] = label
+                break
+
     selected_report_label = st.sidebar.selectbox(
         "Opponent Report",
         options=report_labels,
         index=default_report_index,
-        key=f"opponent_report_select_{st.session_state.get('selected_team_id', 'no_team')}",
+        key=report_select_key,
     )
 
     selected_report = report_by_label[selected_report_label]
@@ -691,7 +723,7 @@ def render_opponent_scouting_panel() -> str:
                 for warning in parser_warnings:
                     st.caption(f"- {warning}")
 
-    with st.sidebar.expander("Change report", expanded=False):
+    with st.sidebar.expander("Import opponent data", expanded=False):
         uploaded_pdf = st.file_uploader(
             "MaxPreps PDF",
             type=["pdf"],
@@ -717,6 +749,11 @@ def render_opponent_scouting_panel() -> str:
                         source_file_name=Path(uploaded_pdf.name).name,
                     )
 
+                    _queue_pending_opponent_report_selection(
+                        team_key=team_key,
+                        opponent_report_id=payload.get("opponent_report_id"),
+                    )
+
                     st.success(
                         f"Imported {payload.get('team_name', 'opponent')} "
                         f"with {len(payload.get('pitchers', []) or [])} pitcher profiles."
@@ -737,14 +774,14 @@ def render_opponent_scouting_panel() -> str:
                 except Exception as exc:
                     st.error(f"Could not import opponent report: {exc}")
 
-    with st.sidebar.expander("Manage reports", expanded=False):
+    with st.sidebar.expander("Manage opponent data", expanded=False):
         st.caption(
             "Deleting removes this scouting report from the current team. "
             "This cannot be undone."
         )
 
         confirm_delete = st.checkbox(
-            "Yes, delete this opponent report",
+            "Yes, delete this opponent data",
             key=f"confirm_delete_opponent_report_{selected_report.get('opponent_report_id', 'report')}",
         )
 
