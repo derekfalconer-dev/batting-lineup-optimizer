@@ -61,6 +61,19 @@ def _run_risk_label(index) -> str:
     return "Extreme"
 
 
+def _clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
+    return max(low, min(high, value))
+
+
+def _run_prevention_score(projected_runs_index) -> float:
+    try:
+        risk_index = float(projected_runs_index)
+    except (TypeError, ValueError):
+        risk_index = 100.0
+
+    return _clamp(100.0 - (((risk_index - 80.0) / 80.0) * 100.0))
+
+
 def _pct(value) -> str:
     try:
         return f"{float(value):.1%}"
@@ -206,6 +219,151 @@ def _render_fit_score_chart(chart_data: pd.DataFrame) -> None:
     st.altair_chart(chart, width="stretch")
 
 
+def _short_pitcher_label(name: str) -> str:
+    parts = [part for part in str(name).strip().split() if part]
+    if len(parts) >= 2:
+        return parts[-1]
+    return str(name)
+
+
+def _build_fit_run_risk_chart_data(report: dict, limit: int = 12) -> pd.DataFrame:
+    rows = []
+
+    for rank, result in enumerate(list(report.get("pitcher_rankings") or [])[:limit], start=1):
+        pitcher = _get_report_value(result, "pitcher")
+        pitcher_name = str(_get_report_value(pitcher, "name", "Unknown pitcher"))
+        projected_runs_index = _get_report_value(result, "projected_runs_index", 100.0)
+
+        try:
+            fit_score = float(_get_report_value(result, "matchup_score", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            continue
+
+        run_prevention_score = _run_prevention_score(projected_runs_index)
+
+        rows.append(
+            {
+                "Rank": rank,
+                "Pitcher": pitcher_name,
+                "Label": _short_pitcher_label(pitcher_name),
+                "Fit Score": round(fit_score, 1),
+                "Run Prevention Score": round(run_prevention_score, 1),
+                "Run Risk": _run_risk_label(projected_runs_index),
+                "Data Confidence": str(_get_report_value(result, "sample_confidence", "Unknown")),
+                "K%": _pct(_get_report_value(pitcher, "k_rate", 0.0)),
+                "BB%": _pct(_get_report_value(pitcher, "bb_rate", 0.0)),
+                "Free-base%": _pct(_get_report_value(pitcher, "free_base_rate", 0.0)),
+                "OBA": _decimal(_get_report_value(pitcher, "oba", 0.0)),
+                "OBP Allowed": _decimal(_get_report_value(pitcher, "obp_allowed", 0.0)),
+                "Matchup Grade": _ui_matchup_grade(result),
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def _render_fit_run_risk_chart(chart_data: pd.DataFrame) -> None:
+    st.markdown("### Fit vs. Run Prevention")
+    st.caption(
+        "Fit Score measures how well the pitcher’s profile matches this opponent lineup. "
+        "It rewards strikeout ability, command, traffic control, damage suppression, and usable sample."
+    )
+    st.caption(
+        "Run Prevention Score summarizes traffic and damage risk on a 0–100 scale. "
+        "Higher is better. It is not projected runs."
+    )
+    st.caption(
+        "These scores are related, so this chart is best used as a quick visual map, "
+        "not a fully independent two-axis model."
+    )
+    st.caption("Best options are higher and farther right. Upper-right is the preferred zone.")
+
+    if chart_data.empty:
+        st.info("No pitcher fit/run-prevention chart data is available.")
+        return
+
+    sorted_data = chart_data.sort_values(
+        ["Fit Score", "Run Prevention Score"],
+        ascending=[False, False],
+    ).reset_index(drop=True)
+
+    if alt is None:
+        st.dataframe(sorted_data, use_container_width=True, hide_index=True)
+        st.caption(
+            "Guide: upper-right = best statistical options; lower-left = tough matchup. "
+            "Because fit and run prevention share inputs, use this as a visual summary "
+            "rather than a strict quadrant model."
+        )
+        return
+
+    base = alt.Chart(sorted_data).encode(
+        x=alt.X(
+            "Run Prevention Score:Q",
+            scale=alt.Scale(domain=[0, 100]),
+            title="Run Prevention Score (higher is better)",
+        ),
+        y=alt.Y(
+            "Fit Score:Q",
+            scale=alt.Scale(domain=[0, 100]),
+            title="Fit Score (higher is better)",
+        ),
+        tooltip=[
+            alt.Tooltip("Pitcher:N", title="Pitcher"),
+            alt.Tooltip("Fit Score:Q", title="Fit Score", format=".1f"),
+            alt.Tooltip("Run Prevention Score:Q", title="Run Prevention Score", format=".1f"),
+            alt.Tooltip("Run Risk:N", title="Run Risk"),
+            alt.Tooltip("Data Confidence:N", title="Data Confidence"),
+            alt.Tooltip("K%:N", title="K%"),
+            alt.Tooltip("BB%:N", title="BB%"),
+            alt.Tooltip("Free-base%:N", title="Free-base%"),
+            alt.Tooltip("OBA:N", title="OBA"),
+            alt.Tooltip("OBP Allowed:N", title="OBP Allowed"),
+            alt.Tooltip("Matchup Grade:N", title="Matchup Grade"),
+        ],
+    )
+
+    points = base.mark_circle(size=90)
+
+    labels = alt.Chart(sorted_data).mark_text(
+        align="left",
+        baseline="middle",
+        dx=8,
+        dy=-4,
+        fontSize=12,
+        color="#E5E7EB",
+    ).encode(
+        x=alt.X("Run Prevention Score:Q"),
+        y=alt.Y("Fit Score:Q"),
+        text=alt.Text("Label:N"),
+    )
+
+    fit_reference = alt.Chart(pd.DataFrame({"Fit Score": [55.0]})).mark_rule(
+        strokeDash=[4, 4],
+    ).encode(
+        y="Fit Score:Q",
+    )
+
+    prevention_reference = alt.Chart(pd.DataFrame({"Run Prevention Score": [50.0]})).mark_rule(
+        strokeDash=[4, 4],
+    ).encode(
+        x="Run Prevention Score:Q",
+    )
+
+    chart = alt.layer(
+        fit_reference,
+        prevention_reference,
+        points,
+        labels,
+    ).properties(height=360)
+
+    st.altair_chart(chart, width="stretch")
+    st.caption(
+        "Guide: upper-right = best statistical options; lower-left = tough matchup. "
+        "Because fit and run prevention share inputs, use this as a visual summary "
+        "rather than a strict quadrant model."
+    )
+
+
 def _build_lineup_rows(report: dict) -> list[dict]:
     rows = []
 
@@ -343,6 +501,9 @@ def render_pitcher_matchup_report_panel() -> None:
 
             fit_score_chart_data = _build_fit_score_chart_data(matchup_report)
             _render_fit_score_chart(fit_score_chart_data)
+
+            fit_run_risk_chart_data = _build_fit_run_risk_chart_data(matchup_report)
+            _render_fit_run_risk_chart(fit_run_risk_chart_data)
 
             st.markdown("### Pitcher Ranking")
             pitcher_rows = _build_pitcher_rows(matchup_report)
