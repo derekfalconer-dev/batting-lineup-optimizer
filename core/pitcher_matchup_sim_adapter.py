@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Sequence
 
 from core.evaluator import evaluate_lineup
@@ -33,6 +34,24 @@ _EVENT_BOUNDS = {
     "3b": (0.000, 0.035),
     "hr": (0.000, 0.080),
 }
+
+
+@dataclass(slots=True)
+class ExistingSimulatorPitcherMatchupResult:
+    pitcher_name: str
+    pitcher_bf: int
+    pitcher_ip: float
+    raw_avg_runs_allowed: float
+    adjusted_avg_runs_allowed: float
+    median_runs_allowed: float
+    p10_runs_allowed: float
+    p90_runs_allowed: float
+    hold_le_2_rate: float
+    hold_le_3_rate: float
+    allow_7_plus_rate: float
+    std_runs_allowed: float
+    reliability: str
+    role_caution: str
 
 
 def build_pitcher_adjusted_sim_players(
@@ -139,6 +158,79 @@ def run_existing_simulator_for_pitcher_matchup(
         n_games=n_games,
         target_runs=target_runs,
         seed=seed,
+    )
+
+
+def run_existing_simulator_pitcher_matchup_report(
+    projected_lineup: Sequence[ProjectedLineupSpot],
+    pitchers: Sequence[PitcherProfile],
+    *,
+    games: int = 5000,
+    innings_per_game: int = 7,
+    seed: int | None = 42,
+    target_runs: float = 4.0,
+    rules: RulesConfig | None = None,
+) -> list[ExistingSimulatorPitcherMatchupResult]:
+    """
+    Run the existing evaluator-backed simulation for multiple candidate pitchers.
+
+    The returned rows are sorted for coach/report consumption: lowest adjusted
+    runs allowed first, then lowest raw average runs allowed, then larger
+    pitcher samples.
+    """
+    rows: list[ExistingSimulatorPitcherMatchupResult] = []
+
+    for idx, pitcher in enumerate(pitchers or []):
+        pitcher_seed = None if seed is None else seed + (idx * 1009)
+
+        sim_result = run_existing_simulator_for_pitcher_matchup(
+            projected_lineup,
+            pitcher,
+            games=games,
+            innings_per_game=innings_per_game,
+            seed=pitcher_seed,
+            target_runs=target_runs,
+            rules=rules,
+        )
+
+        runs_allowed = [
+            float(value)
+            for value in (getattr(sim_result, "runs_scored_distribution", []) or [])
+        ]
+        raw_avg_runs = float(getattr(sim_result, "mean_runs", 0.0) or 0.0)
+        pitcher_bf = _pitcher_bf(pitcher)
+        pitcher_ip = _pitcher_ip(pitcher)
+
+        rows.append(
+            ExistingSimulatorPitcherMatchupResult(
+                pitcher_name=str(getattr(pitcher, "name", "Unknown pitcher")),
+                pitcher_bf=pitcher_bf,
+                pitcher_ip=pitcher_ip,
+                raw_avg_runs_allowed=raw_avg_runs,
+                adjusted_avg_runs_allowed=_adjusted_runs_allowed(
+                    raw_avg_runs,
+                    pitcher_bf,
+                    pitcher_ip,
+                ),
+                median_runs_allowed=float(getattr(sim_result, "median_runs", 0.0) or 0.0),
+                p10_runs_allowed=float(getattr(sim_result, "p10_runs", 0.0) or 0.0),
+                p90_runs_allowed=float(getattr(sim_result, "p90_runs", 0.0) or 0.0),
+                hold_le_2_rate=_pct_le(runs_allowed, 2.0),
+                hold_le_3_rate=_pct_le(runs_allowed, 3.0),
+                allow_7_plus_rate=_pct_ge(runs_allowed, 7.0),
+                std_runs_allowed=float(getattr(sim_result, "std_runs", 0.0) or 0.0),
+                reliability=_reliability_label(pitcher_bf, pitcher_ip),
+                role_caution=_role_caution(pitcher_bf, pitcher_ip),
+            )
+        )
+
+    return sorted(
+        rows,
+        key=lambda row: (
+            row.adjusted_avg_runs_allowed,
+            row.raw_avg_runs_allowed,
+            -row.pitcher_bf,
+        ),
     )
 
 
@@ -317,6 +409,69 @@ def _normalize_player_probabilities(raw_probabilities: dict[str, float]) -> dict
     }
 
 
+def _pct_le(values: Sequence[float], threshold: float) -> float:
+    if not values:
+        return 0.0
+
+    return sum(1 for value in values if float(value) <= threshold) / len(values)
+
+
+def _pct_ge(values: Sequence[float], threshold: float) -> float:
+    if not values:
+        return 0.0
+
+    return sum(1 for value in values if float(value) >= threshold) / len(values)
+
+
+def _pitcher_ip(pitcher: PitcherProfile) -> float:
+    try:
+        return max(0.0, float(getattr(pitcher, "ip", 0.0) or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _pitcher_bf(pitcher: PitcherProfile) -> int:
+    try:
+        return max(0, int(getattr(pitcher, "bf", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _reliability_label(bf: int, ip: float) -> str:
+    if bf >= 100 or ip >= 20:
+        return "High"
+    if bf >= 50 or ip >= 10:
+        return "Medium"
+    return "Low"
+
+
+def _role_caution(bf: int, ip: float) -> str:
+    reliability = _reliability_label(bf, ip)
+
+    if reliability == "High":
+        return "Established pitching sample"
+    if reliability == "Medium":
+        return "Usable but still developing sample"
+    if bf < 25 or ip < 3:
+        return "Emergency/depth sample"
+    return "Limited pitching sample"
+
+
+def _adjusted_runs_allowed(raw_avg_runs: float, bf: int, ip: float) -> float:
+    reliability = _reliability_label(bf, ip)
+    adjustment = 0.0
+
+    if reliability == "Medium":
+        adjustment += 0.35
+    elif reliability == "Low":
+        adjustment += 1.15
+
+    if bf < 25 or ip < 3:
+        adjustment += 0.40
+
+    return float(raw_avg_runs or 0.0) + adjustment
+
+
 def _safe_div(numerator: float, denominator: float, default: float = 0.0) -> float:
     if denominator == 0:
         return default
@@ -357,6 +512,8 @@ def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
 
 
 __all__ = [
+    "ExistingSimulatorPitcherMatchupResult",
     "build_pitcher_adjusted_sim_players",
     "run_existing_simulator_for_pitcher_matchup",
+    "run_existing_simulator_pitcher_matchup_report",
 ]
