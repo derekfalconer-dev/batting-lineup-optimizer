@@ -138,7 +138,7 @@ APP_TITLE = "Batting Lineup Optimizer"
 APP_SUBTITLE = "Lineup optimization for baseball coaches"
 
 # Dev-only feature flag. Keep OFF unless testing locally on the spike branch.
-ENABLE_PITCHER_MATCHUP_REPORT = False
+ENABLE_PITCHER_MATCHUP_REPORT = True
 
 NUDGE_TOOLTIP_BY_FIELD = {
     "contact": "Small adjustment to how often the hitter puts the ball in play and reaches safely. Higher values usually mean more balls in play, more hits, and fewer strikeouts.",

@@ -12,10 +12,8 @@ except ImportError:
     alt = None
 
 from core.maxpreps_pdf_parser import parse_maxpreps_pdf, report_to_dict
-from core.pitcher_matchups import (
-    build_pitcher_matchup_report,
-    format_pitcher_matchup_report,
-)
+from core.pitcher_matchup_sim_adapter import run_existing_simulator_pitcher_matchup_report
+from core.pitcher_matchups import build_pitcher_matchup_report
 
 
 def _write_uploaded_pdf(uploaded_file, destination: Path) -> None:
@@ -364,6 +362,219 @@ def _render_fit_run_risk_chart(chart_data: pd.DataFrame) -> None:
     )
 
 
+def _get_sim_value(item, key: str, default=None):
+    if item is None:
+        return default
+
+    if isinstance(item, dict):
+        return item.get(key, default)
+
+    return getattr(item, key, default)
+
+
+def _sample_label(reliability: str) -> str:
+    return {
+        "High": "Large",
+        "Medium": "Medium",
+        "Low": "Small",
+    }.get(str(reliability or "").strip(), "Unknown")
+
+
+def _sample_phrase(reliability: str) -> str:
+    label = _sample_label(reliability).lower()
+    if label == "unknown":
+        return "unknown pitching sample"
+    return f"{label} pitching sample"
+
+
+def _role_sample_label(role: str, reliability: str) -> str:
+    role_mapping = {
+        "Established pitching sample": "Large pitching sample",
+        "Usable but still developing sample": "Medium pitching sample",
+        "Limited pitching sample": "Small pitching sample",
+        "Emergency/depth sample": "Small pitching sample",
+    }
+
+    cleaned_role = str(role or "").strip()
+    if cleaned_role in role_mapping:
+        return role_mapping[cleaned_role]
+
+    return _sample_phrase(reliability).capitalize()
+
+
+def _build_simulation_rows(simulation_results: list) -> list[dict]:
+    rows = []
+
+    for result in simulation_results or []:
+        raw_runs = float(_get_sim_value(result, "raw_avg_runs_allowed", 0.0) or 0.0)
+        adjusted_runs = float(_get_sim_value(result, "adjusted_avg_runs_allowed", raw_runs) or raw_runs)
+        hold_le_3 = float(_get_sim_value(result, "hold_le_3_rate", 0.0) or 0.0)
+        allow_7_plus = float(_get_sim_value(result, "allow_7_plus_rate", 0.0) or 0.0)
+        pitcher_bf = int(_get_sim_value(result, "pitcher_bf", 0) or 0)
+        pitcher_ip = float(_get_sim_value(result, "pitcher_ip", 0.0) or 0.0)
+        reliability = str(_get_sim_value(result, "reliability", "Unknown") or "Unknown")
+        role = str(_get_sim_value(result, "role_caution", "") or "")
+
+        rows.append(
+            {
+                "Pitcher": str(_get_sim_value(result, "pitcher_name", "Unknown pitcher")),
+                "Raw Runs": raw_runs,
+                "Adjusted Runs": adjusted_runs,
+                "Sample": _sample_label(reliability),
+                "Hold ≤3": hold_le_3,
+                "7+ Risk": allow_7_plus,
+                "BF": pitcher_bf,
+                "IP": pitcher_ip,
+                "_reliability": reliability,
+                "_raw_role": role,
+                "_adjustment_gap": adjusted_runs - raw_runs,
+            }
+        )
+
+    return sorted(rows, key=lambda row: (row["Adjusted Runs"], row["Raw Runs"], -row["BF"]))
+
+
+def _format_simulation_rows_for_table(rows: list[dict]) -> list[dict]:
+    formatted_rows = []
+
+    for row in rows:
+        formatted_rows.append(
+            {
+                "Pitcher": row["Pitcher"],
+                "Raw Runs": f"{float(row['Raw Runs']):.2f}",
+                "Adjusted Runs": f"{float(row['Adjusted Runs']):.2f}",
+                "Sample": row["Sample"],
+                "Hold ≤3": f"{float(row['Hold ≤3']):.1%}",
+                "7+ Risk": f"{float(row['7+ Risk']):.1%}",
+                "BF": int(row["BF"]),
+                "IP": f"{float(row['IP']):.1f}",
+            }
+        )
+
+    return formatted_rows
+
+
+def _render_simulation_backed_pitching_plan(simulation_results: list) -> None:
+    rows = _build_simulation_rows(simulation_results)
+
+    st.markdown("### Projected Runs Allowed vs. This Opponent Lineup")
+    st.caption(
+        "This ranks your pitching options using the app’s game simulator against the projected opponent lineup. "
+        "Lower adjusted runs is better; the adjustment adds caution when the available pitching sample is small."
+    )
+
+    if not rows:
+        st.info("No simulation-backed pitching plan is available yet.")
+        return
+
+    best_usable = next(
+        (row for row in rows if row["_reliability"] in {"High", "Medium"}),
+        rows[0],
+    )
+    safest_established = next(
+        (row for row in rows if row["_reliability"] == "High"),
+        None,
+    )
+    high_variance = next(
+        (
+            row
+            for row in sorted(rows, key=lambda item: item["Raw Runs"])
+            if row["_reliability"] == "Low" and row["_adjustment_gap"] >= 0.75
+        ),
+        None,
+    )
+    small_sample_rows = [
+        row
+        for row in rows
+        if row["Sample"] == "Small"
+    ]
+
+    chart_data = pd.DataFrame(rows)
+
+    if alt is not None and not chart_data.empty:
+        chart = (
+            alt.Chart(chart_data)
+            .mark_bar()
+            .encode(
+                y=alt.Y(
+                    "Pitcher:N",
+                    sort=alt.EncodingSortField(field="Adjusted Runs", order="ascending"),
+                    title=None,
+                ),
+                x=alt.X(
+                    "Adjusted Runs:Q",
+                    title="Adjusted runs allowed",
+                ),
+                tooltip=[
+                    alt.Tooltip("Pitcher:N"),
+                    alt.Tooltip("Raw Runs:Q", title="Raw Runs", format=".2f"),
+                    alt.Tooltip("Adjusted Runs:Q", title="Adjusted Runs", format=".2f"),
+                    alt.Tooltip("Sample:N"),
+                    alt.Tooltip("Hold ≤3:Q", format=".1%"),
+                    alt.Tooltip("7+ Risk:Q", format=".1%"),
+                ],
+            )
+            .properties(height=max(180, 30 * len(rows)))
+        )
+
+        st.altair_chart(chart, width="stretch")
+
+    card_cols = st.columns(2)
+
+    with card_cols[0]:
+        st.markdown("#### Best usable option")
+        st.markdown(
+            f"**{best_usable['Pitcher']}** — "
+            f"{best_usable['Adjusted Runs']:.2f} adjusted runs "
+            f"({_sample_phrase(best_usable['_reliability'])})."
+        )
+
+        st.markdown("#### Safest established read")
+        if safest_established:
+            st.markdown(
+                f"**{safest_established['Pitcher']}** — "
+                f"{safest_established['Adjusted Runs']:.2f} adjusted runs "
+                f"over {safest_established['IP']:.1f} IP / {int(safest_established['BF'])} BF."
+            )
+        else:
+            st.caption("No high-reliability pitching sample is available in this report.")
+
+    with card_cols[1]:
+        st.markdown("#### High-variance upside")
+        if high_variance:
+            st.markdown(
+                f"**{high_variance['Pitcher']}** had a strong raw simulation result, "
+                f"but only has {high_variance['IP']:.1f} IP / {int(high_variance['BF'])} BF in the data, "
+                "so the adjusted score adds a small-sample caution."
+            )
+        else:
+            st.caption("No low-reliability upside arm was flagged by the simulation.")
+
+        st.markdown("#### Small-sample caution")
+        if small_sample_rows:
+            st.markdown(
+                ", ".join(row["Pitcher"] for row in small_sample_rows)
+                + " have small pitching samples in the data, so treat their simulation results as directional "
+                "until coach scouting or more innings confirm them."
+            )
+        else:
+            st.caption("No small pitching sample was flagged.")
+
+    st.dataframe(
+        _format_simulation_rows_for_table(rows),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.caption("Raw Runs is the direct simulated average runs allowed.")
+    st.caption("Adjusted Runs is the sample-size cautious recommendation score.")
+    st.caption("Sample describes the pitcher’s available innings and batters faced in the data.")
+    st.caption(
+        "Use the top recommendation as a planning input, then layer in real-world coaching context "
+        "such as availability, defense, pitch count, and whether the pitcher also plays a key defensive position."
+    )
+
+
 def _build_lineup_rows(report: dict) -> list[dict]:
     rows = []
 
@@ -450,7 +661,21 @@ def render_pitcher_matchup_report_panel() -> None:
                     own_pitching_rows=list(own_team_payload.get("pitchers") or []),
                     lineup_size=9,
                 )
-                formatted_report = format_pitcher_matchup_report(matchup_report)
+
+                simulation_results = []
+                simulation_error = None
+
+                try:
+                    simulation_results = run_existing_simulator_pitcher_matchup_report(
+                        projected_lineup=list(matchup_report.get("projected_lineup") or []),
+                        pitchers=list(matchup_report.get("pitchers") or []),
+                        games=3000,
+                        innings_per_game=7,
+                        seed=42,
+                        target_runs=4.0,
+                    )
+                except Exception as exc:
+                    simulation_error = exc
 
             rankings = list(matchup_report.get("pitcher_rankings") or [])
 
@@ -468,55 +693,10 @@ def render_pitcher_matchup_report_panel() -> None:
                     icon="⚠️",
                 )
 
-            st.markdown("### Top Recommendation")
-
-            if rankings:
-                top_result = rankings[0]
-                top_pitcher = _get_report_value(top_result, "pitcher")
-                top_pitcher_name = str(_get_report_value(top_pitcher, "name", "Unknown pitcher"))
-                top_score = _get_report_value(top_result, "matchup_score", 0.0)
-                top_confidence = str(_get_report_value(top_result, "sample_confidence", "Unknown"))
-                top_run_risk = _run_risk_label(
-                    _get_report_value(top_result, "projected_runs_index", 100.0)
-                )
-
-                try:
-                    numeric_top_score = float(top_score)
-                except (TypeError, ValueError):
-                    numeric_top_score = 0.0
-
-                if numeric_top_score < 55:
-                    short_read = "Best option in the current data, but not a clean matchup."
-                else:
-                    short_read = "Usable statistical matchup, subject to coach scouting and availability."
-
-                with st.container(border=True):
-                    st.markdown(f"**Best available statistical matchup:** {top_pitcher_name}")
-                    st.markdown(f"**Fit score:** {_score(top_score)} / 100")
-                    st.markdown(f"**Run risk:** {top_run_risk}")
-                    st.markdown(f"**Data confidence:** {top_confidence}")
-                    st.markdown(f"**Coach read:** {short_read}")
+            if simulation_error is not None:
+                st.warning("Simulation-backed pitcher report could not be generated yet.")
             else:
-                st.info("No pitcher rankings are available yet.")
-
-            fit_score_chart_data = _build_fit_score_chart_data(matchup_report)
-            _render_fit_score_chart(fit_score_chart_data)
-
-            fit_run_risk_chart_data = _build_fit_run_risk_chart_data(matchup_report)
-            _render_fit_run_risk_chart(fit_run_risk_chart_data)
-
-            st.markdown("### Pitcher Ranking")
-            pitcher_rows = _build_pitcher_rows(matchup_report)
-            if pitcher_rows:
-                table_height = min(340, 38 + (35 * len(pitcher_rows)))
-                st.dataframe(
-                    pitcher_rows,
-                    use_container_width=True,
-                    hide_index=True,
-                    height=table_height,
-                )
-            else:
-                st.info("No pitcher ranking rows are available.")
+                _render_simulation_backed_pitching_plan(list(simulation_results))
 
             st.markdown("### Projected Opponent Lineup")
             st.caption(
@@ -536,14 +716,6 @@ def render_pitcher_matchup_report_panel() -> None:
                     st.write(f"- {assumption}")
             else:
                 st.caption("No assumptions were provided with this report.")
-
-            with st.expander("Full text report", expanded=False):
-                st.text_area(
-                    "Pitching matchup report",
-                    value=formatted_report,
-                    height=700,
-                    key="experimental_pitcher_matchup_report_output",
-                )
 
         except Exception as exc:
             st.error(f"Could not generate pitching matchup report: {exc}")
