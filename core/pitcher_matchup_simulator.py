@@ -42,7 +42,10 @@ class PitcherSimulationResult:
     games_simulated: int
     innings_per_game: int
     avg_runs_allowed: float
+    adjusted_avg_runs_allowed: float
     median_runs_allowed: float
+    reliability_label: str
+    role_caution: str
     pct_hold_to_2_or_less: float
     pct_hold_to_3_or_less: float
     pct_allow_5_plus: float
@@ -71,7 +74,16 @@ def simulate_pitcher_vs_projected_lineup(
     innings_count = _safe_positive_int(innings_per_game)
     hitters = [spot.hitter for spot in projected_lineup if getattr(spot, "hitter", None)]
 
-    notes = _simulation_notes(pitcher, hitters)
+    reliability_label = _simulation_reliability_label(pitcher)
+    role_caution = _role_caution(pitcher)
+    caution_adjustment = _low_sample_risk_adjustment(pitcher)
+    notes = _simulation_notes(
+        pitcher,
+        hitters,
+        reliability_label=reliability_label,
+        role_caution=role_caution,
+        caution_adjustment=caution_adjustment,
+    )
 
     if games_count <= 0 or innings_count <= 0 or not hitters:
         if not hitters:
@@ -86,7 +98,10 @@ def simulate_pitcher_vs_projected_lineup(
             games_simulated=0,
             innings_per_game=max(innings_count, 0),
             avg_runs_allowed=0.0,
+            adjusted_avg_runs_allowed=0.0,
             median_runs_allowed=0.0,
+            reliability_label=reliability_label,
+            role_caution=role_caution,
             pct_hold_to_2_or_less=0.0,
             pct_hold_to_3_or_less=0.0,
             pct_allow_5_plus=0.0,
@@ -120,7 +135,7 @@ def simulate_pitcher_vs_projected_lineup(
                 lineup_index += 1
 
                 event = _sample_event(probabilities_by_hitter[hitter_idx], rng)
-                bases, outs, runs_scored = _apply_event(event, bases, outs)
+                bases, outs, runs_scored = _apply_event(event, bases, outs, rng)
 
                 game_runs += runs_scored
                 inning_runs += runs_scored
@@ -133,13 +148,17 @@ def simulate_pitcher_vs_projected_lineup(
 
     total_games = len(game_run_totals)
     total_innings = total_games * innings_count
+    avg_runs_allowed = sum(game_run_totals) / total_games
 
     return PitcherSimulationResult(
         pitcher_name=pitcher.name,
         games_simulated=total_games,
         innings_per_game=innings_count,
-        avg_runs_allowed=sum(game_run_totals) / total_games,
+        avg_runs_allowed=avg_runs_allowed,
+        adjusted_avg_runs_allowed=avg_runs_allowed + caution_adjustment,
         median_runs_allowed=float(statistics.median(game_run_totals)),
+        reliability_label=reliability_label,
+        role_caution=role_caution,
         pct_hold_to_2_or_less=_pct_count(game_run_totals, lambda runs: runs <= 2),
         pct_hold_to_3_or_less=_pct_count(game_run_totals, lambda runs: runs <= 3),
         pct_allow_5_plus=_pct_count(game_run_totals, lambda runs: runs >= 5),
@@ -304,6 +323,7 @@ def _apply_event(
     event: str,
     bases: tuple[bool, bool, bool],
     outs: int,
+    rng: random.Random,
 ) -> tuple[tuple[bool, bool, bool], int, int]:
     first, second, third = bases
     runs = 0
@@ -322,16 +342,22 @@ def _apply_event(
             runs,
         )
 
-    if event == "SO" or event == "OUT":
+    if event == "SO":
+        return bases, outs + 1, 0
+
+    if event == "OUT":
+        if outs < 2 and third and rng.random() < 0.25:
+            return (first, second, False), outs + 1, 1
         return bases, outs + 1, 0
 
     if event == "1B":
-        runs += int(third)
-        return (True, first, second), outs, runs
+        runs += int(third) + int(second)
+        return (True, first, False), outs, runs
 
     if event == "2B":
-        runs += int(third) + int(second)
-        return (False, True, first), outs, runs
+        first_scores = bool(first and rng.random() < 0.60)
+        runs += int(third) + int(second) + int(first_scores)
+        return (False, True, bool(first and not first_scores)), outs, runs
 
     if event == "3B":
         runs += int(first) + int(second) + int(third)
@@ -396,17 +422,82 @@ def _normalize_event_probabilities(raw_probabilities: dict[str, float]) -> dict[
     }
 
 
+def _simulation_reliability_label(pitcher: PitcherProfile) -> str:
+    bf = int(pitcher.bf or 0)
+
+    if bf >= 100:
+        return "High"
+    if bf >= 50:
+        return "Medium"
+    return "Low"
+
+
+def _role_caution(pitcher: PitcherProfile) -> str:
+    bf = int(pitcher.bf or 0)
+
+    if bf >= 100:
+        return "Established pitching sample"
+    if bf >= 50:
+        return "Usable but still developing sample"
+    if bf >= 25:
+        return "Limited pitching sample"
+    return "Emergency/depth sample"
+
+
+def _low_sample_risk_adjustment(pitcher: PitcherProfile) -> float:
+    bf = int(pitcher.bf or 0)
+    adjustment = 0.0
+
+    if bf < 75:
+        adjustment += 0.25
+    if bf < 50:
+        adjustment += 0.35
+    if bf < 25:
+        adjustment += 0.40
+
+    free_base_rate = float(pitcher.free_base_rate or 0.0)
+    obp_allowed = float(pitcher.obp_allowed or 0.0)
+    oba = float(pitcher.oba or 0.0)
+
+    if free_base_rate >= 0.18:
+        adjustment += 0.25
+    if free_base_rate >= 0.25:
+        adjustment += 0.30
+
+    if obp_allowed >= 0.450:
+        adjustment += 0.25
+    if obp_allowed >= 0.550:
+        adjustment += 0.30
+
+    if oba >= 0.350:
+        adjustment += 0.20
+    if oba >= 0.450:
+        adjustment += 0.25
+
+    return _clamp(adjustment, 0.0, 1.75)
+
+
 def _simulation_notes(
     pitcher: PitcherProfile,
     hitters: list[OpponentHitterProfile],
+    *,
+    reliability_label: str,
+    role_caution: str,
+    caution_adjustment: float,
 ) -> list[str]:
     notes = [
         "First-pass isolated Monte Carlo model; not pitch-level scouting and not wired into the optimizer.",
-        "Base advancement is intentionally simple: outs do not advance runners and hits advance station-to-station by event type.",
+        "Base advancement is intentionally simple and approximates common high-school run scoring movement.",
     ]
 
-    if int(pitcher.bf or 0) < 60:
-        notes.append("Pitcher sample is small, so rates are heavily shrunk toward baseline.")
+    if reliability_label == "Low":
+        notes.append("Low simulation reliability: pitcher sample is small, so adjusted runs include a caution penalty.")
+
+    if caution_adjustment > 0:
+        notes.append("Adjusted average runs includes a small-sample/risk caution adjustment.")
+
+    if role_caution in {"Limited pitching sample", "Emergency/depth sample"}:
+        notes.append("Limited mound usage may reflect coach trust, defensive needs, or role constraints.")
 
     low_sample_hitters = sum(1 for hitter in hitters if int(hitter.pa or 0) < 25)
     if low_sample_hitters:

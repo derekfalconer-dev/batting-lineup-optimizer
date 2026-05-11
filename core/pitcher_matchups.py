@@ -569,6 +569,11 @@ def build_pitcher_matchup_report(
     opponent_batting_rows: list[dict],
     own_pitching_rows: list[dict],
     lineup_size: int = 9,
+    *,
+    include_simulation: bool = False,
+    simulation_games: int = 5000,
+    simulation_innings: int = 7,
+    simulation_seed: int | None = 42,
 ) -> dict:
     hitters = build_opponent_hitters_from_rows(opponent_batting_rows)
     pitchers = build_pitchers_from_rows(own_pitching_rows)
@@ -576,7 +581,7 @@ def build_pitcher_matchup_report(
     lineup_summary = summarize_opponent_lineup(projected_lineup)
     pitcher_rankings = rank_pitchers_for_opponent(pitchers, projected_lineup)
 
-    return {
+    report = {
         "hitters": hitters,
         "pitchers": pitchers,
         "projected_lineup": projected_lineup,
@@ -584,6 +589,26 @@ def build_pitcher_matchup_report(
         "pitcher_rankings": pitcher_rankings,
         "assumptions": get_pitcher_matchup_assumptions(),
     }
+
+    if not include_simulation:
+        return report
+
+    from core.pitcher_matchup_simulator import simulate_pitcher_matchup_report
+
+    report["simulation_results"] = simulate_pitcher_matchup_report(
+        pitcher_rankings,
+        projected_lineup,
+        games=simulation_games,
+        innings_per_game=simulation_innings,
+        seed=simulation_seed,
+    )
+    report["simulation_settings"] = {
+        "games": simulation_games,
+        "innings": simulation_innings,
+        "seed": simulation_seed,
+    }
+
+    return report
 
 
 def project_opponent_lineup(
@@ -983,6 +1008,357 @@ def _get_report_value(item: Any, key: str, default: Any = None) -> Any:
     return getattr(item, key, default)
 
 
+def summarize_simulation_results(simulation_results: list) -> list[dict]:
+    rows: list[dict] = []
+
+    for result in simulation_results or []:
+        avg_runs_allowed = _get_report_value(result, "avg_runs_allowed", 0.0)
+        adjusted_avg_runs_allowed = getattr(
+            result,
+            "adjusted_avg_runs_allowed",
+            _get_report_value(result, "adjusted_avg_runs_allowed", avg_runs_allowed),
+        )
+        reliability_label = getattr(
+            result,
+            "reliability_label",
+            _get_report_value(result, "reliability_label", "Unknown"),
+        )
+        role_caution = getattr(
+            result,
+            "role_caution",
+            _get_report_value(result, "role_caution", ""),
+        )
+
+        rows.append(
+            {
+                "Pitcher": str(_get_report_value(result, "pitcher_name", "Unknown pitcher")),
+                "Avg Runs": _as_float(avg_runs_allowed),
+                "Adjusted Avg Runs": _as_float(adjusted_avg_runs_allowed),
+                "Reliability": str(reliability_label or "Unknown"),
+                "Role Caution": str(role_caution or ""),
+                "Median Runs": _as_float(_get_report_value(result, "median_runs_allowed", 0.0)),
+                "Hold <= 2": _as_float(_get_report_value(result, "pct_hold_to_2_or_less", 0.0)),
+                "Hold <= 3": _as_float(_get_report_value(result, "pct_hold_to_3_or_less", 0.0)),
+                "Allow 5+": _as_float(_get_report_value(result, "pct_allow_5_plus", 0.0)),
+                "Allow 7+": _as_float(_get_report_value(result, "pct_allow_7_plus", 0.0)),
+                "Blowup Inning Rate": _as_float(_get_report_value(result, "blowup_inning_rate", 0.0)),
+                "Games": _as_int(_get_report_value(result, "games_simulated", 0)),
+                "Innings": _as_int(_get_report_value(result, "innings_per_game", 0)),
+            }
+        )
+
+    return rows
+
+
+def build_simulation_comparison_rows(
+    pitcher_rankings: list[PitcherMatchupResult],
+    simulation_results: list,
+) -> list[dict]:
+    rows: list[dict] = []
+
+    for heuristic_rank, (ranking, result) in enumerate(
+        zip(pitcher_rankings or [], simulation_results or []),
+        start=1,
+    ):
+        pitcher = _get_report_value(ranking, "pitcher")
+        avg_runs_allowed = _get_report_value(result, "avg_runs_allowed", 0.0)
+        adjusted_avg_runs_allowed = _get_report_value(
+            result,
+            "adjusted_avg_runs_allowed",
+            avg_runs_allowed,
+        )
+
+        rows.append(
+            {
+                "Pitcher": str(
+                    _get_report_value(
+                        pitcher,
+                        "name",
+                        _get_report_value(result, "pitcher_name", "Unknown pitcher"),
+                    )
+                ),
+                "Heuristic Rank": heuristic_rank,
+                "Fit Score": _as_float(_get_report_value(ranking, "matchup_score", 0.0)),
+                "Heuristic Run Risk Index": _as_float(
+                    _get_report_value(ranking, "projected_runs_index", 0.0)
+                ),
+                "Raw Avg Runs": _as_float(avg_runs_allowed),
+                "Adjusted Avg Runs": _as_float(adjusted_avg_runs_allowed),
+                "Median Runs": _as_float(_get_report_value(result, "median_runs_allowed", 0.0)),
+                "Hold <= 3": _as_float(_get_report_value(result, "pct_hold_to_3_or_less", 0.0)),
+                "Allow 5+": _as_float(_get_report_value(result, "pct_allow_5_plus", 0.0)),
+                "Allow 7+": _as_float(_get_report_value(result, "pct_allow_7_plus", 0.0)),
+                "Blowup Inning Rate": _as_float(
+                    _get_report_value(result, "blowup_inning_rate", 0.0)
+                ),
+                "Reliability": str(_get_report_value(result, "reliability_label", "Unknown") or "Unknown"),
+                "Role Caution": str(_get_report_value(result, "role_caution", "") or ""),
+            }
+        )
+
+    sorted_rows = sorted(
+        rows,
+        key=lambda row: (
+            _as_float(row.get("Adjusted Avg Runs"), 0.0),
+            _as_float(row.get("Raw Avg Runs"), 0.0),
+            _as_int(row.get("Heuristic Rank"), 0),
+        ),
+    )
+
+    return [
+        {
+            "Sim Rank": sim_rank,
+            **row,
+        }
+        for sim_rank, row in enumerate(sorted_rows, start=1)
+    ]
+
+
+def build_simulation_coach_read(
+    pitcher_rankings: list[PitcherMatchupResult],
+    simulation_results: list,
+) -> dict:
+    combined_rows = _build_simulation_coach_rows(pitcher_rankings, simulation_results)
+
+    if not combined_rows:
+        return {
+            "best_established_option": None,
+            "best_simulated_run_prevention": None,
+            "high_variance_options": [],
+            "emergency_depth_cautions": [],
+            "summary": "No simulation recommendation is available yet.",
+        }
+
+    established_candidates: list[dict] = []
+    for reliability in ("High", "Medium"):
+        established_candidates = [
+            row for row in combined_rows
+            if str(row.get("Reliability", "")).strip() == reliability
+        ]
+        if established_candidates:
+            break
+
+    if not established_candidates:
+        established_candidates = combined_rows
+
+    best_established = min(
+        established_candidates,
+        key=lambda row: (
+            _as_float(row.get("Adjusted Avg Runs"), 0.0),
+            _as_float(row.get("Raw Avg Runs"), 0.0),
+            _as_int(row.get("Heuristic Rank"), 0),
+        ),
+    )
+    best_simulated = combined_rows[0]
+
+    high_variance_options = _build_high_variance_simulation_options(combined_rows)
+    emergency_depth_cautions = _build_emergency_depth_simulation_cautions(combined_rows)
+
+    best_established_name = str(best_established.get("Pitcher", "Unknown pitcher"))
+    best_simulated_name = str(best_simulated.get("Pitcher", "Unknown pitcher"))
+
+    if best_established_name == best_simulated_name:
+        summary = (
+            f"{best_established_name} is both the best established option and "
+            "the best adjusted simulation option."
+        )
+    else:
+        summary = (
+            f"{best_established_name} is the safest established read, while "
+            f"{best_simulated_name} has the best adjusted simulation result."
+        )
+
+    if high_variance_options:
+        summary += " At least one arm shows simulation upside but carries added sample/role risk."
+
+    return {
+        "best_established_option": _compact_simulation_coach_option(
+            best_established,
+            explanation=_established_option_explanation(best_established),
+        ),
+        "best_simulated_run_prevention": _compact_simulation_coach_option(
+            best_simulated,
+            explanation=(
+                "Lowest adjusted simulation runs allowed after accounting for "
+                "sample and risk caution."
+            ),
+        ),
+        "high_variance_options": high_variance_options,
+        "emergency_depth_cautions": emergency_depth_cautions,
+        "summary": summary,
+    }
+
+
+def _build_simulation_coach_rows(
+    pitcher_rankings: list[PitcherMatchupResult],
+    simulation_results: list,
+) -> list[dict]:
+    rows: list[dict] = []
+
+    for heuristic_rank, (ranking, result) in enumerate(
+        zip(pitcher_rankings or [], simulation_results or []),
+        start=1,
+    ):
+        pitcher = _get_report_value(ranking, "pitcher")
+        raw_avg_runs = _get_report_value(result, "avg_runs_allowed", 0.0)
+        adjusted_avg_runs = getattr(
+            result,
+            "adjusted_avg_runs_allowed",
+            _get_report_value(result, "adjusted_avg_runs_allowed", raw_avg_runs),
+        )
+        reliability = getattr(
+            result,
+            "reliability_label",
+            _get_report_value(result, "reliability_label", "Unknown"),
+        )
+        role_caution = getattr(
+            result,
+            "role_caution",
+            _get_report_value(result, "role_caution", ""),
+        )
+
+        rows.append(
+            {
+                "Pitcher": str(
+                    _get_report_value(
+                        pitcher,
+                        "name",
+                        _get_report_value(result, "pitcher_name", "Unknown pitcher"),
+                    )
+                ),
+                "Heuristic Rank": heuristic_rank,
+                "Fit Score": _as_float(_get_report_value(ranking, "matchup_score", 0.0)),
+                "Heuristic Run Risk Index": _as_float(
+                    _get_report_value(ranking, "projected_runs_index", 0.0)
+                ),
+                "Raw Avg Runs": _as_float(raw_avg_runs),
+                "Adjusted Avg Runs": _as_float(adjusted_avg_runs),
+                "Median Runs": _as_float(_get_report_value(result, "median_runs_allowed", 0.0)),
+                "Hold <= 3": _as_float(_get_report_value(result, "pct_hold_to_3_or_less", 0.0)),
+                "Allow 5+": _as_float(_get_report_value(result, "pct_allow_5_plus", 0.0)),
+                "Allow 7+": _as_float(_get_report_value(result, "pct_allow_7_plus", 0.0)),
+                "Blowup Inning Rate": _as_float(
+                    _get_report_value(result, "blowup_inning_rate", 0.0)
+                ),
+                "Reliability": str(reliability or "Unknown"),
+                "Role Caution": str(role_caution or ""),
+                "_k_rate": _as_float(_get_report_value(pitcher, "k_rate", 0.0)),
+                "_free_base_rate": _as_float(_get_report_value(pitcher, "free_base_rate", 0.0)),
+            }
+        )
+
+    sorted_rows = sorted(
+        rows,
+        key=lambda row: (
+            _as_float(row.get("Adjusted Avg Runs"), 0.0),
+            _as_float(row.get("Raw Avg Runs"), 0.0),
+            _as_int(row.get("Heuristic Rank"), 0),
+        ),
+    )
+
+    for sim_rank, row in enumerate(sorted_rows, start=1):
+        row["Sim Rank"] = sim_rank
+
+    return sorted_rows
+
+
+def _compact_simulation_coach_option(row: dict, *, explanation: str) -> dict:
+    return {
+        "pitcher": str(row.get("Pitcher", "Unknown pitcher")),
+        "heuristic_rank": _as_int(row.get("Heuristic Rank", 0)),
+        "sim_rank": _as_int(row.get("Sim Rank", 0)),
+        "fit_score": round(_as_float(row.get("Fit Score", 0.0)), 1),
+        "adjusted_avg_runs": round(_as_float(row.get("Adjusted Avg Runs", 0.0)), 2),
+        "raw_avg_runs": round(_as_float(row.get("Raw Avg Runs", 0.0)), 2),
+        "reliability": str(row.get("Reliability", "Unknown") or "Unknown"),
+        "role_caution": str(row.get("Role Caution", "") or ""),
+        "explanation": explanation,
+    }
+
+
+def _established_option_explanation(row: dict) -> str:
+    reliability = str(row.get("Reliability", "Unknown") or "Unknown")
+
+    if reliability in {"High", "Medium"}:
+        return (
+            f"Best adjusted run-prevention result among {reliability.lower()}-reliability "
+            "pitching samples."
+        )
+
+    return (
+        "No high- or medium-reliability option was available; this is the best "
+        "adjusted simulation result among available arms."
+    )
+
+
+def _build_high_variance_simulation_options(rows: list[dict]) -> list[dict]:
+    options: list[dict] = []
+
+    for row in rows:
+        raw_avg_runs = _as_float(row.get("Raw Avg Runs", 0.0))
+        adjusted_avg_runs = _as_float(row.get("Adjusted Avg Runs", raw_avg_runs))
+        reliability = str(row.get("Reliability", "Unknown") or "Unknown")
+        adjustment_gap = adjusted_avg_runs - raw_avg_runs
+
+        has_sample_role_volatility = reliability != "High" and adjustment_gap >= 0.75
+        has_stuff_command_volatility = (
+            _as_float(row.get("_k_rate", 0.0)) >= 0.200
+            and _as_float(row.get("_free_base_rate", 0.0)) >= 0.180
+        )
+
+        if not (has_sample_role_volatility or has_stuff_command_volatility):
+            continue
+
+        if has_sample_role_volatility and has_stuff_command_volatility:
+            explanation = "Raw simulation shows upside, but limited sample and free-base risk create volatility."
+        elif has_sample_role_volatility:
+            explanation = "Raw simulation shows upside, but limited mound sample or role history adds caution."
+        else:
+            explanation = "Strikeout upside is present, but free-base risk creates volatility."
+
+        options.append(
+            {
+                "pitcher": str(row.get("Pitcher", "Unknown pitcher")),
+                "raw_avg_runs": round(raw_avg_runs, 2),
+                "adjusted_avg_runs": round(adjusted_avg_runs, 2),
+                "reliability": reliability,
+                "role_caution": str(row.get("Role Caution", "") or ""),
+                "explanation": explanation,
+            }
+        )
+
+    return options
+
+
+def _build_emergency_depth_simulation_cautions(rows: list[dict]) -> list[dict]:
+    cautions: list[dict] = []
+
+    for row in rows:
+        adjusted_avg_runs = _as_float(row.get("Adjusted Avg Runs", 0.0))
+        reliability = str(row.get("Reliability", "Unknown") or "Unknown")
+        role_caution = str(row.get("Role Caution", "") or "")
+
+        if "emergency" not in role_caution.lower() and not (
+            reliability == "Low" and adjusted_avg_runs >= 6.50
+        ):
+            continue
+
+        cautions.append(
+            {
+                "pitcher": str(row.get("Pitcher", "Unknown pitcher")),
+                "adjusted_avg_runs": adjusted_avg_runs,
+                "reliability": reliability,
+                "role_caution": role_caution,
+                "explanation": (
+                    "Treat as depth context rather than a clean statistical recommendation; "
+                    "sample size or role history adds caution."
+                ),
+            }
+        )
+
+    return cautions
+
+
 def _format_rate_decimal(value: Any) -> str:
     try:
         return f"{float(value):.3f}"
@@ -1273,5 +1649,8 @@ __all__ = [
     "project_opponent_lineup",
     "rank_pitchers_for_opponent",
     "summarize_opponent_lineup",
+    "summarize_simulation_results",
+    "build_simulation_comparison_rows",
+    "build_simulation_coach_read",
     "get_pitcher_matchup_assumptions",
 ]
