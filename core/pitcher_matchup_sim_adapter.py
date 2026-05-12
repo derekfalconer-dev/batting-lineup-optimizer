@@ -458,16 +458,16 @@ def _role_caution(bf: int, ip: float) -> str:
 
 
 def _adjusted_runs_allowed(raw_avg_runs: float, bf: int, ip: float) -> float:
-    reliability = _reliability_label(bf, ip)
-    adjustment = 0.0
-
-    if reliability == "Medium":
-        adjustment += 0.35
-    elif reliability == "Low":
-        adjustment += 1.15
-
-    if bf < 25 or ip < 3:
-        adjustment += 0.40
+    """
+    Adjusted Runs = simulated average runs allowed plus a small-sample caution
+    only below 50 BF / 10 IP.
+    """
+    if bf >= 50 or ip >= 10:
+        adjustment = 0.0
+    elif bf >= 25 or ip >= 3:
+        adjustment = 0.60
+    else:
+        adjustment = 1.20
 
     return float(raw_avg_runs or 0.0) + adjustment
 

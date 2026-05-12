@@ -4620,6 +4620,7 @@ def main() -> None:
     render_signed_in_banner()
 
     if ENABLE_PITCHER_MATCHUP_REPORT:
+        st.divider()
         render_pitcher_matchup_report_panel()
 
     if not _has_pitcher_matchup_context(run_settings.get("rules_config", {}) or {}):

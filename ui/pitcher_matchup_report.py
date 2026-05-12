@@ -12,6 +12,7 @@ except ImportError:
     alt = None
 
 from core.maxpreps_pdf_parser import parse_maxpreps_pdf, report_to_dict
+from core.models import RulesConfig
 from core.pitcher_matchup_sim_adapter import run_existing_simulator_pitcher_matchup_report
 from core.pitcher_matchups import build_pitcher_matchup_report
 
@@ -454,13 +455,186 @@ def _format_simulation_rows_for_table(rows: list[dict]) -> list[dict]:
     return formatted_rows
 
 
+def _simulation_probability(value) -> float:
+    try:
+        return _clamp(float(value or 0.0), 0.0, 1.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _build_game_script_bucket_chart_data(simulation_results: list) -> pd.DataFrame:
+    bucket_order = ["0–2 runs", "3 runs", "4–6 runs", "7+ runs"]
+    rows = []
+
+    normalized_results = []
+    for result in simulation_results or []:
+        pitcher_name = str(_get_sim_value(result, "pitcher_name", "Unknown pitcher"))
+        pitcher_bf = int(_get_sim_value(result, "pitcher_bf", 0) or 0)
+        pitcher_ip = float(_get_sim_value(result, "pitcher_ip", 0.0) or 0.0)
+        raw_runs = float(_get_sim_value(result, "raw_avg_runs_allowed", 0.0) or 0.0)
+        adjusted_runs = float(_get_sim_value(result, "adjusted_avg_runs_allowed", raw_runs) or raw_runs)
+        reliability = str(_get_sim_value(result, "reliability", "Unknown") or "Unknown")
+
+        normalized_results.append(
+            {
+                "Pitcher": pitcher_name,
+                "BF": pitcher_bf,
+                "IP": pitcher_ip,
+                "Raw Runs": raw_runs,
+                "Adjusted Runs": adjusted_runs,
+                "Reliability": reliability,
+                "_result": result,
+            }
+        )
+
+    top_sample_names = {
+        row["Pitcher"]
+        for row in sorted(
+            normalized_results,
+            key=lambda row: (row["BF"], row["IP"], row["Pitcher"]),
+            reverse=True,
+        )[:3]
+    }
+    included_names = {
+        row["Pitcher"]
+        for row in normalized_results
+        if row["BF"] >= 50
+    }
+    included_names.update(top_sample_names)
+
+    included_results = sorted(
+        [row for row in normalized_results if row["Pitcher"] in included_names],
+        key=lambda row: (
+            row["Adjusted Runs"],
+            row["Raw Runs"],
+            -row["BF"],
+            row["Pitcher"],
+        ),
+    )
+
+    for result_row in included_results:
+        result = result_row["_result"]
+        pitcher_name = result_row["Pitcher"]
+        pitcher_bf = result_row["BF"]
+        pitcher_ip = result_row["IP"]
+        raw_runs = result_row["Raw Runs"]
+        adjusted_runs = result_row["Adjusted Runs"]
+        reliability = result_row["Reliability"]
+
+        hold_le_2 = _simulation_probability(_get_sim_value(result, "hold_le_2_rate", 0.0))
+        hold_le_3 = max(
+            hold_le_2,
+            _simulation_probability(_get_sim_value(result, "hold_le_3_rate", 0.0)),
+        )
+        allow_7_plus = _simulation_probability(_get_sim_value(result, "allow_7_plus_rate", 0.0))
+
+        bucket_probabilities = {
+            "0–2 runs": hold_le_2,
+            "3 runs": max(0.0, hold_le_3 - hold_le_2),
+            "4–6 runs": max(0.0, 1.0 - hold_le_3 - allow_7_plus),
+            "7+ runs": allow_7_plus,
+        }
+
+        for bucket_idx, bucket in enumerate(bucket_order):
+            rows.append(
+                {
+                    "Pitcher": pitcher_name,
+                    "Bucket": bucket,
+                    "Bucket Order": bucket_idx,
+                    "Probability": bucket_probabilities[bucket],
+                    "Raw Runs": raw_runs,
+                    "Adjusted Runs": adjusted_runs,
+                    "Sample": _sample_label(reliability),
+                    "BF": pitcher_bf,
+                    "IP": pitcher_ip,
+                }
+            )
+
+    return pd.DataFrame(rows)
+
+
+def _render_game_script_bucket_chart(simulation_results: list) -> None:
+    try:
+        chart_data = _build_game_script_bucket_chart_data(simulation_results)
+    except Exception:
+        st.caption("Game script chart needs simulation probability data.")
+        return
+
+    if chart_data.empty:
+        st.caption("Game script chart needs simulation probability data.")
+        return
+
+    st.markdown("### Game Script Probability by Pitcher")
+    st.caption(
+        "Shown for pitchers with at least 50 BF, plus the top three available samples. "
+        "Buckets are raw simulation outcomes; pitchers are ordered by adjusted runs."
+    )
+
+    if alt is None:
+        st.caption("Game script chart needs simulation probability data.")
+        return
+
+    bucket_order = ["0–2 runs", "3 runs", "4–6 runs", "7+ runs"]
+    pitcher_order = (
+        chart_data.sort_values(
+            ["Adjusted Runs", "Raw Runs", "Pitcher"],
+            ascending=[True, True, True],
+        )["Pitcher"]
+        .drop_duplicates()
+        .tolist()
+    )
+
+    chart = (
+        alt.Chart(chart_data)
+        .mark_bar()
+        .encode(
+            x=alt.X(
+                "Bucket:N",
+                title="Run Bucket",
+                sort=bucket_order,
+                axis=alt.Axis(labelAngle=0),
+            ),
+            xOffset=alt.XOffset(
+                "Pitcher:N",
+                sort=pitcher_order,
+            ),
+            y=alt.Y(
+                "Probability:Q",
+                scale=alt.Scale(domain=[0, 1]),
+                axis=alt.Axis(format="%"),
+                title="Probability",
+            ),
+            color=alt.Color(
+                "Pitcher:N",
+                sort=pitcher_order,
+                title="Pitcher",
+            ),
+            tooltip=[
+                alt.Tooltip("Pitcher:N", title="Pitcher"),
+                alt.Tooltip("Bucket:N", title="Run Bucket"),
+                alt.Tooltip("Probability:Q", title="Probability", format=".1%"),
+                alt.Tooltip("Raw Runs:Q", title="Raw Runs", format=".2f"),
+                alt.Tooltip("Adjusted Runs:Q", title="Adjusted Runs", format=".2f"),
+                alt.Tooltip("Sample:N", title="Sample"),
+                alt.Tooltip("BF:Q", title="BF", format=","),
+                alt.Tooltip("IP:Q", title="IP", format=".1f"),
+            ],
+        )
+        .properties(height=390)
+    )
+
+    st.altair_chart(chart, width="stretch")
+    st.caption("Lower-risk options have more probability in 0–3 runs and less in 7+ runs.")
+
+
 def _render_simulation_backed_pitching_plan(simulation_results: list) -> None:
     rows = _build_simulation_rows(simulation_results)
 
     st.markdown("### Projected Runs Allowed vs. This Opponent Lineup")
     st.caption(
         "This ranks your pitching options using the app’s game simulator against the projected opponent lineup. "
-        "Lower adjusted runs is better; the adjustment adds caution when the available pitching sample is small."
+        "Lower adjusted runs is better; Adjusted Runs = simulated average runs allowed plus a "
+        "small-sample caution only below 50 BF / 10 IP."
     )
 
     if not rows:
@@ -518,6 +692,8 @@ def _render_simulation_backed_pitching_plan(simulation_results: list) -> None:
         )
 
         st.altair_chart(chart, width="stretch")
+
+    _render_game_script_bucket_chart(simulation_results)
 
     card_cols = st.columns(2)
 
@@ -664,6 +840,15 @@ def render_pitcher_matchup_report_panel() -> None:
 
                 simulation_results = []
                 simulation_error = None
+                simulation_rules = RulesConfig(
+                    innings=7,
+                    max_runs_per_inning=99,
+                    steals_allowed=True,
+                    leadoffs_allowed=True,
+                    base_distance_ft=90,
+                    continuous_batting=True,
+                    lineup_size=len(matchup_report.get("projected_lineup") or []),
+                )
 
                 try:
                     simulation_results = run_existing_simulator_pitcher_matchup_report(
@@ -673,6 +858,7 @@ def render_pitcher_matchup_report_panel() -> None:
                         innings_per_game=7,
                         seed=42,
                         target_runs=4.0,
+                        rules=simulation_rules,
                     )
                 except Exception as exc:
                     simulation_error = exc
@@ -685,6 +871,10 @@ def render_pitcher_matchup_report_panel() -> None:
             st.caption(
                 f"Source check: opponent hitters = {opponent_team_name} | "
                 f"your pitching staff = {own_team_name}"
+            )
+            st.caption(
+                "Simulation settings: High School style · 7 innings · 60/90 · "
+                "leadoffs · no run cap"
             )
 
             if opponent_team_name == own_team_name:
